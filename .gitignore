@@ -1,0 +1,6 @@
+credentials.json
+telegram_config.py
+__pycache__/
+*.pyc
+venv/
+.idea/

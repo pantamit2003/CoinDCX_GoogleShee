@@ -38,7 +38,8 @@ from strategy.trade_plan import generate_trade_plan
 LEADERBOARD_COLUMNS = [
     "Pair", "Close", "High", "Trend_Stage", "Direction",
     "Trend_Score", "Momentum_Score", "Volume_Score",
-    "Breakout_Score", "RS_Score", "Confidence", "RVOL_20",
+    "Breakout_Score", "RS_Score", "Confidence",
+    "RVOL_20", "RVOL_40", "RVOL_60", "RVOL_80",
     "Made_New_Low_Recently", "Bars_Since_90d_Low",
     "Entry_Trigger", "Entry_Price", "Stop_Loss_Price",
     "Take_Profit_Price", "Risk_Reward", "Expected_Move_Percent",

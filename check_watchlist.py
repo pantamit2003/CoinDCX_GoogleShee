@@ -13,7 +13,7 @@ SHEET_TAB_NAME = "Coiled_Spring_Watchlist"
 # Scheduler se automation set ho jayegi (raat ko khud chalega), tab
 # ise None kar dena taaki SAARE active pairs scan hon (time ki chinta
 # nahi rahegi kyunki tum so rahe hoge, script khud chalegi).
-MAX_PAIRS_TO_SCAN = 100
+MAX_PAIRS_TO_SCAN = 300
 
 # Telegram message mein zyada se zyada kitne coins ki list dikhani hai
 # (poori list hamesha Google Sheet mein hoti hi hai)

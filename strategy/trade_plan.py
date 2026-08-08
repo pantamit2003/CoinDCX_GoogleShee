@@ -10,7 +10,7 @@ Converts Confidence + Trend_Stage + ATR into concrete, actionable levels:
     Stop_Loss_Price       -> ATR-based, direction-aware
     Stop_Loss_Percent      -> SL distance as %
     Take_Profit_Price       -> ATR-based, direction-aware, capped to your
-                                stated 1-3% target range
+                                stated target range
     Take_Profit_Percent      -> TP distance as %
     Expected_Move_Percent     -> same as TP_Percent for now (single-target
                                   system); kept separate so a future
@@ -23,6 +23,16 @@ coin with very different volatility than what you tuned the rule on. ATR
 adapts the SL/TP distance to how much THIS coin actually moves per bar
 right now, so a calm coin gets tight levels and a wild coin gets wider
 ones — both proportional to their own noise, not a one-size-fits-all number.
+
+TP CAP NOTE (updated after B-TUT_USDT case, 8 Aug 2026):
+max_target_percent was originally 3.0. For genuinely explosive coins (very
+high ATR%, e.g. a fresh breakout day), Stop_Loss scales UP with ATR with
+no cap, but Take_Profit was hitting the 3.0 ceiling almost immediately —
+so Risk_Reward looked artificially bad (e.g. 0.29) for exactly the coins
+this system is trying to catch. Raised to 15.0 so the natural
+tp_atr_multiple/sl_atr_multiple ratio (2.5x) can play out for high-ATR
+breakout coins, while calm coins are unaffected (their natural TP is
+already well under the old 3% cap).
 
 Requires: Close, ATR_Percent, Direction, Confidence, Trend_Stage
 (ATR_Percent comes from your existing indicators/atr.py module)
@@ -41,7 +51,7 @@ class TradePlanGenerator:
         sl_atr_multiple=1.0,
         tp_atr_multiple=2.5,
         min_target_percent=1.0,
-        max_target_percent=3.0,
+        max_target_percent=15.0,
         min_sl_percent=0.3,
         min_risk_reward=1.5,
     ):

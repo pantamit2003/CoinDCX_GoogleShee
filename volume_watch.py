@@ -3,27 +3,33 @@ volume_watch.py
 
 2-DIN WALA TRACKING SYSTEM — jo tumne bola wahi idea:
 
-  DIN 1 (aaj): Jis coin ka volume aaj spike hua (RVOL_20 >= 2.0), uska
-  naam aur aaj ka High + Close ek file (volume_watchlist.json) mein
-  save kar lo. Koi trade nahi, sirf note karna. YE LIST AB TERMINAL +
+  DIN 1 (candle-day): Jis coin ka volume us din spike hua (RVOL_20 >= 2.0),
+  uska naam aur us din ka High + Close ek file (volume_watchlist.json)
+  mein save kar lo. Koi trade nahi, sirf note karna. YE LIST TERMINAL +
   SHEET ("Volume_Watching" tab) + TELEGRAM teeno mein dikhti hai.
 
   Ab har coin ke saath ek "Spike_Confidence" bhi dikhta hai — 4 alag
   time-windows (20/40/60/80 din) se compare karke, kitne windows mein
-  volume genuinely unusual hai. "4/4" matlab pichhle 80 din ke muqable
-  bhi ye volume unusual hai — bahut genuine spike. "1/4" matlab sirf
-  pichhle 20 din ke muqable hi zyada laga, shayad chhota lull tha,
-  itna trust-worthy nahi.
+  volume genuinely unusual hai.
 
-  DIN 2 (kal): Isi script ko phir chalao. Ye pehle watchlist file
-  kholega, aur check karega — jo coins kal note kiye the, unka price
-  AAJ kal ke High se upar nikla kya? Agar haan -> CONFIRMED, trade
-  layak signal (Sheet: "Volume_Confirmed" tab). Agar nahi -> chup-chap
-  discard, koi trade nahi.
+  DIN 2 (agla candle-day): Isi script ko phir chalao. Ye pehle watchlist
+  file kholega, aur check karega — jo coins pichhle din note kiye the,
+  unka price us din ke High se upar nikla kya? Agar haan -> CONFIRMED,
+  trade layak signal (Sheet: "Volume_Confirmed" tab). Agar nahi ->
+  chup-chap discard, koi trade nahi.
 
-  Isse RIVER jaisa case automatically handle hota hai: 6 Aug ko
-  volume spike -> watchlist mein aata. 7 Aug ko price upar nahi gayi
-  (jaisa dekha gaya) -> confirm nahi hota -> khud-ba-khud discard.
+IMPORTANT FIX (8 Aug 2026): Pehle ye script "Spike_Date" ke liye LOCAL
+SYSTEM DATE use karta tha (jab script chali, wahi date save hoti thi).
+Lekin candles.py ka fix hamesha "kal" tak ki COMPLETE candle analyze
+karta hai (aaj ki incomplete candle drop ho jaati hai) — toh agar tum
+"8 Aug" ko din mein script chalao, asal candle jo analyze hoti hai wo
+"7 Aug" ki hoti hai, lekin local-date se Spike_Date "8 Aug" save ho
+jaata tha — EK DIN AAGE, galat label.
+
+FIX: Ab Spike_Date, aur age-tracking (3-din discard) dono, LEADERBOARD
+ke andar wali ASAL CANDLE DATE (row["Time"]) se calculate hote hain —
+system ki local date se nahi. Isse label hamesha sahi candle ki date
+dikhayega, chahe script kisi bhi time pe chale.
 
 Roz isi ek script ko chalate raho — pehle purani watchlist check
 karega (confirm/discard), phir naye spikes watchlist mein add karega.
@@ -44,7 +50,7 @@ from notifications.telegram_bot import send_telegram_message
 
 WATCHLIST_FILE = "volume_watchlist.json"
 RVOL_ALERT_THRESHOLD = 2.0      # itna volume ho toh "note kar lo" (halka threshold)
-MAX_WATCH_AGE_DAYS = 3          # itne din tak confirm na ho toh discard kar do
+MAX_WATCH_AGE_DAYS = 3          # itne (candle) din tak confirm na ho toh discard kar do
 
 # Kitne alag time-windows se volume ko compare karna hai — jitna zyada
 # window pass kare, utna genuine spike (short-term fluke nahi)
@@ -94,6 +100,22 @@ def scan_today(pairs=None) -> pd.DataFrame:
     return engine.scan(pairs)
 
 
+def get_candle_date(leaderboard: pd.DataFrame, fallback: str) -> str:
+    """
+    Leaderboard ke andar se ASAL candle ki date nikalta hai (row["Time"]
+    se) — local system date pe depend nahi karta. Saare coins ka "Time"
+    same hona chahiye (sabki last complete daily candle same din ki
+    hoti hai), isliye pehli valid row se le lete hain.
+    Agar kisi wajah se "Time" available na ho, fallback (system date)
+    use hota hai taaki script crash na ho.
+    """
+    if "Time" in leaderboard.columns:
+        valid_times = leaderboard["Time"].dropna()
+        if not valid_times.empty:
+            return pd.to_datetime(valid_times.iloc[0]).date().isoformat()
+    return fallback
+
+
 def spike_confidence(row) -> tuple:
     """
     Har RVOL window (20/40/60/80) ko check karta hai — kitne mein
@@ -110,13 +132,18 @@ def spike_confidence(row) -> tuple:
 
 
 def main():
-    today = datetime.date.today().isoformat()
-    print(f"Volume-watch chal raha hai — {today}\n")
+    run_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    system_date_fallback = datetime.date.today().isoformat()
+    print(f"Volume-watch chal raha hai — {run_timestamp}\n")
 
     leaderboard = scan_today()
     if leaderboard.empty:
         print("Koi data nahi mila, scan fail hua.")
         return
+
+    # ---- ASAL candle ki date nikalo (local system date se NAHI) ----
+    candle_date = get_candle_date(leaderboard, fallback=system_date_fallback)
+    print(f"Analyze ho rahi candle ki date: {candle_date}\n")
 
     watchlist = load_watchlist()
     confirmed_rows = []
@@ -124,7 +151,10 @@ def main():
 
     # ---- STEP 1: purani watchlist ke coins check karo — confirm hue ya nahi ----
     for pair, entry in watchlist.items():
-        age_days = (datetime.date.fromisoformat(today) - datetime.date.fromisoformat(entry["date"])).days
+        age_days = (
+            datetime.date.fromisoformat(candle_date)
+            - datetime.date.fromisoformat(entry["date"])
+        ).days
 
         if age_days > MAX_WATCH_AGE_DAYS:
             continue  # bahut purana ho gaya, discard — kabhi confirm nahi hua
@@ -136,8 +166,9 @@ def main():
 
         row = row_match.iloc[0]
 
-        # CONFIRM hone ki shart: aaj ka close, jis din volume spike hua tha
-        # uske High se upar nikal jaye, aur coin abhi "still falling" na ho
+        # CONFIRM hone ki shart: is candle ka close, jis din volume spike
+        # hua tha uske High se upar nikal jaye, aur coin abhi "still
+        # falling" na ho
         if (
             row["Close"] > entry["high"]
             and not bool(row.get("Made_New_Low_Recently", False))
@@ -159,10 +190,7 @@ def main():
         else:
             still_watching[pair] = entry  # abhi bhi wait karo
 
-    # ---- STEP 2: aaj ke naye volume-spike coins watchlist mein add karo ----
-    # (ye woh list hai jo tumne poocha — "aaj kis coin ka volume achanak
-    # bahut zyada hai pichhle din(s) ke muqable" — Din-1 ka detection.
-    # Ab 4 windows se check hota hai, sirf 20-din se nahi)
+    # ---- STEP 2: is candle-din ke naye volume-spike coins watchlist mein add karo ----
     new_spike_rows = []
     for _, row in leaderboard.iterrows():
         pair = row["Pair"]
@@ -174,14 +202,14 @@ def main():
             if pair not in still_watching:
                 confidence_count, confidence_label = spike_confidence(row)
                 still_watching[pair] = {
-                    "date": today,
+                    "date": candle_date,
                     "high": float(row["High"]),
                     "close": float(row["Close"]),
                     "rvol": float(rvol_20),
                 }
                 new_spike_rows.append({
                     "Pair": pair,
-                    "Spike_Date": today,
+                    "Spike_Date": candle_date,
                     "Spike_High": float(row["High"]),
                     "Spike_Close": float(row["Close"]),
                     "RVOL_20": float(rvol_20),
@@ -196,73 +224,67 @@ def main():
 
     # ---- Output ----
     if confirmed_rows:
-        print(f"{len(confirmed_rows)} coin(s) CONFIRMED — kal volume spike hua tha, "
-              f"aaj price kal ke High se upar nikal gayi:\n")
+        print(f"{len(confirmed_rows)} coin(s) CONFIRMED — pichhle candle-din volume spike hua tha, "
+              f"is candle ka close pichhle High se upar nikal gaya:\n")
         print(pd.DataFrame(confirmed_rows).to_string(index=False))
     else:
-        print("Aaj koi coin confirm nahi hua (purani watchlist mein se).")
+        print("Is candle-din koi coin confirm nahi hua (purani watchlist mein se).")
 
     if new_spike_rows:
-        # sabse genuine (zyada windows pass) sabse upar dikhado
         sorted_spikes = sorted(new_spike_rows, key=lambda r: r["_confidence_count"], reverse=True)
-        print(f"\n{len(new_spike_rows)} NAYA coin aaj volume-spike dikha "
-              f"(confirmation kal check hogi), sabse genuine pehle:\n")
+        print(f"\n{len(new_spike_rows)} NAYA coin {candle_date} ki candle mein volume-spike dikha "
+              f"(confirmation agli candle pe check hogi), sabse genuine pehle:\n")
         display_df = pd.DataFrame(sorted_spikes).drop(columns=["_confidence_count"])
         print(display_df.to_string(index=False))
     else:
-        print("\nAaj koi naya volume-spike coin nahi mila.")
+        print(f"\n{candle_date} ki candle mein koi naya volume-spike coin nahi mila.")
 
     print(f"\nTotal {len(still_watching)} coin(s) abhi watch mein hain.")
 
     # ---- Google Sheet mein bhejo (2 tabs) ----
-    push_confirmed_to_sheet(confirmed_rows)
-    push_watching_to_sheet(new_spike_rows)
+    push_confirmed_to_sheet(confirmed_rows, run_timestamp)
+    push_watching_to_sheet(new_spike_rows, run_timestamp)
 
     # ---- Telegram pe bhejo (dono, sirf agar data ho) ----
     push_confirmed_to_telegram(confirmed_rows)
-    push_watching_to_telegram(new_spike_rows)
+    push_watching_to_telegram(new_spike_rows, candle_date)
 
 
-def push_confirmed_to_sheet(confirmed_rows: list):
+def push_confirmed_to_sheet(confirmed_rows: list, run_timestamp: str):
     """
     confirmed_rows (trade-ready coins) ko Google Sheet ke
     "Volume_Confirmed" tab mein likhta hai. Agar koi coin confirm
     nahi hua, tab bhi ek "no result" row likhta hai (timestamp ke
     saath) taaki Sheet check karne pe pata chale ki scan chala tha.
     """
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     if not confirmed_rows:
         placeholder = pd.DataFrame([{col: "-" for col in CONFIRMED_COLUMNS}])
-        placeholder["Trend_Stage"] = "Koi coin aaj confirm nahi hua"
-        placeholder["Last_Updated"] = timestamp
+        placeholder["Trend_Stage"] = "Koi coin confirm nahi hua"
+        placeholder["Last_Updated"] = run_timestamp
         write_leaderboard(placeholder, worksheet_name=SHEET_TAB_CONFIRMED)
     else:
         to_write = pd.DataFrame(confirmed_rows)[CONFIRMED_COLUMNS].copy()
-        to_write["Last_Updated"] = timestamp
+        to_write["Last_Updated"] = run_timestamp
         write_leaderboard(to_write, worksheet_name=SHEET_TAB_CONFIRMED)
 
     print(f"\nGoogle Sheet ke '{SHEET_TAB_CONFIRMED}' tab mein bhi likh diya.")
 
 
-def push_watching_to_sheet(new_spike_rows: list):
+def push_watching_to_sheet(new_spike_rows: list, run_timestamp: str):
     """
-    new_spike_rows (aaj ke fresh Din-1 volume-spike coins, abhi tak
+    new_spike_rows (is candle-din ke fresh volume-spike coins, abhi tak
     UNCONFIRMED) ko Google Sheet ke "Volume_Watching" tab mein likhta
-    hai — 4-window RVOL aur Spike_Confidence ke saath. Har roz
-    overwrite hota hai — sirf AAJ ke naye spikes dikhata hai.
+    hai — 4-window RVOL aur Spike_Confidence ke saath.
     """
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     if not new_spike_rows:
         placeholder = pd.DataFrame([{col: "-" for col in WATCHING_COLUMNS}])
-        placeholder["Pair"] = "Aaj koi naya volume-spike coin nahi mila"
-        placeholder["Last_Updated"] = timestamp
+        placeholder["Pair"] = "Koi naya volume-spike coin nahi mila"
+        placeholder["Last_Updated"] = run_timestamp
         write_leaderboard(placeholder, worksheet_name=SHEET_TAB_WATCHING)
     else:
         to_write = pd.DataFrame(new_spike_rows).drop(columns=["_confidence_count"])
         to_write = to_write[WATCHING_COLUMNS].copy()
-        to_write["Last_Updated"] = timestamp
+        to_write["Last_Updated"] = run_timestamp
         write_leaderboard(to_write, worksheet_name=SHEET_TAB_WATCHING)
 
     print(f"Google Sheet ke '{SHEET_TAB_WATCHING}' tab mein bhi likh diya.")
@@ -278,14 +300,14 @@ def push_confirmed_to_telegram(confirmed_rows: list):
         print("Telegram: koi coin confirm nahi hua, isliye 'Confirmed' message skip.")
         return
 
-    today = datetime.date.today().strftime("%d-%b-%Y")
-    lines = [f"✅ <b>Volume Confirmed</b> — {today}", f"{len(confirmed_rows)} coin(s) confirm hue:\n"]
+    today_label = datetime.date.today().strftime("%d-%b-%Y")
+    lines = [f"✅ <b>Volume Confirmed</b> — {today_label}", f"{len(confirmed_rows)} coin(s) confirm hue:\n"]
 
     for row in confirmed_rows:
         lines.append(
             f"🎯 <b>{row['Pair']}</b>\n"
             f"   Spike Date: {row['Spike_Date']}  |  Spike High: {row['Spike_High']}\n"
-            f"   Today Close: {row['Today_Close']}  |  RVOL: {round(row['RVOL_20_Today'], 2)}\n"
+            f"   Close: {row['Today_Close']}  |  RVOL: {round(row['RVOL_20_Today'], 2)}\n"
             f"   Entry: {row['Entry_Price']}  SL: {row['Stop_Loss_Price']}  TP: {row['Take_Profit_Price']}\n"
             f"   RR: {round(row['Risk_Reward'], 2) if row['Risk_Reward'] is not None else '-'}\n"
         )
@@ -294,20 +316,19 @@ def push_confirmed_to_telegram(confirmed_rows: list):
     print("Telegram pe 'Confirmed' message bhej diya.")
 
 
-def push_watching_to_telegram(new_spike_rows: list):
+def push_watching_to_telegram(new_spike_rows: list, candle_date: str):
     """
-    Aaj ke fresh Din-1 volume-spike coins (abhi UNCONFIRMED) ki ek
+    Is candle-din ke fresh volume-spike coins (abhi UNCONFIRMED) ki ek
     halki list bhejta hai — koi Entry/SL/TP nahi (kyunki abhi confirm
-    nahi hua), sirf "inpe nazar rakho, kal confirm hoga" wala note.
-    Spike_Confidence bhi dikhata hai (4/4 = sabse genuine).
+    nahi hua), sirf "inpe nazar rakho" wala note. Spike_Confidence bhi
+    dikhata hai (4/4 = sabse genuine).
     """
     if not new_spike_rows:
         print("Telegram: koi naya spike nahi mila, isliye 'Watching' message skip.")
         return
 
-    today = datetime.date.today().strftime("%d-%b-%Y")
-    lines = [f"👀 <b>Naya Volume Spike (Din-1)</b> — {today}",
-             f"{len(new_spike_rows)} coin(s) mein volume achanak badha, kal confirmation check hoga:\n"]
+    lines = [f"👀 <b>Naya Volume Spike</b> — candle date {candle_date}",
+             f"{len(new_spike_rows)} coin(s) mein volume achanak badha, agli candle pe confirmation check hoga:\n"]
 
     sorted_rows = sorted(new_spike_rows, key=lambda r: r["_confidence_count"], reverse=True)
     for row in sorted_rows:

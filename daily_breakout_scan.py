@@ -38,7 +38,7 @@ from notifications.telegram_bot import send_telegram_message
 # Scheduler se automation set ho jayegi (raat ko khud chalega), tab
 # ise None kar dena taaki SAARE active pairs scan hon.
 # ---------------------------------------------------------------------
-MAX_PAIRS_TO_SCAN = 250
+MAX_PAIRS_TO_SCAN = 300
 
 # TYPE 1 — explosive breakout: sudden, high volume
 EXPLOSIVE_STAGES = {

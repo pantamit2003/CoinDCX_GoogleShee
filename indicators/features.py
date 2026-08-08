@@ -226,7 +226,7 @@ def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
     exist on df (i.e. run your existing indicators.ema / indicators.atr
     modules first).
     """
-    df = add_rvol(df)
+    df = add_rvol(df, windows=(20, 40, 60, 80))
     df = add_vwap(df)
 
     for ema_col in ["EMA9", "EMA20", "EMA50"]:

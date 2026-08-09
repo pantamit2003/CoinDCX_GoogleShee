@@ -2,7 +2,7 @@ name: Daily CoinDCX Scan
 
 on:
   schedule:
-    - cron: '20 0 * * *'   # 12:20 AM UTC = 5:50 AM IST
+    - cron: '5 0 * * *'   # 12:05 AM UTC = 5:35 AM IST
   workflow_dispatch:
 
 permissions:

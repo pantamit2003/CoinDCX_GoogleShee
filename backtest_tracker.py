@@ -1,50 +1,39 @@
 """
-backtest_tracker.py
-====================
-NAYA STANDALONE MODULE — koi existing script touch nahi karta.
+backtest_tracker.py  (v2 — Google Sheet based, GitHub Actions-safe)
+=====================================================================
+PEHLE (v1) local backtest_pending.json file use karta tha — lekin
+GitHub Actions har run mein NAYI, FRESH virtual machine deta hai, isliye
+wo file kabhi persist nahi hoti thi (har run ke baad gayab ho jaati thi).
 
-MAQSAD: Jab intraday_spike_monitor.py mein koi spike detect ho, uska
-outcome track karna — "spike ke N candles baad price upar gayi ya
-neeche" (N = 1, 3, 5 candles = 15min / 45min / 1h15min).
+FIX: Ab "pending spikes" Google Sheet ke ek tab mein store hoti hain
+("Pending_Spikes") — jo hamesha persistent hai, GitHub Actions ke
+ephemeral-VM problem se bilkul bach jaate hain.
 
-intraday_spike_monitor.py isse sirf 2 jagah use karta hai:
-    1. resolve_pending(dry_run=DRY_RUN)  — har run ki SHURUAAT mein call
-       karo. Purani pending spikes check karta hai, jinke horizons
-       close ho chuke hain unka result nikaal ke Sheet mein likh deta
-       hai aur pending list se hata deta hai.
-    2. add_pending(...)                   — jab naya spike detect ho,
-       use tracking mein daalne ke liye.
+POORA FLOW:
+    1. intraday_spike_monitor.py mein jab naya spike detect ho:
+       add_pending(...) call hota hai → row "Pending_Spikes" tab mein
+       likha jaata hai.
 
-DATA FILE: backtest_pending.json (isi folder mein, auto-create hota hai)
-    [
-      {
-        "pair": "B-BTC_USDT",
-        "trigger_type": "BOTH",
-        "candle_color": "RED",
-        "spike_time": "2026-08-11T06:45:00+00:00",
-        "spike_close": 61234.5,
-        "resolved": {"1": null, "3": null, "5": null}
-      },
-      ...
-    ]
+    2. Har naye run ki SHURUAAT mein:
+       resolve_pending(dry_run=...) call hota hai →
+         - "Pending_Spikes" tab se saari pending spikes padhta hai
+         - Har spike ke liye check karta hai ki 15/45/75 min baad ki
+           candle data mein aa chuki hai ya nahi
+         - Agar aa chuki hai (matlab poora 75-min tak track ho chuka):
+             → result "Spike_Backtest_Results" tab mein likh deta hai
+             → us spike ko "Pending_Spikes" se hata deta hai
+         - Agar abhi tak nahi aayi:
+             → wapas "Pending_Spikes" mein rakh deta hai (agle run mein
+               phir check hoga)
+         - Agar spike bahut purani ho gayi (MAX_AGE_HOURS se zyada,
+           jaise pair delist ho gaya ho ya data-gap ho) → discard
 
-RESULT SHEET TAB: "Spike_Backtest_Results"
-    Pair | Spike_Time_UTC | Candle_Color | Trigger_Type | Spike_Close |
-    Price_After_1 | PctChg_1 | Price_After_3 | PctChg_3 |
-    Price_After_5 | PctChg_5
-
-IMPORTANT — CLOSED CANDLE ASSUMPTION:
-    Yeh module maan ke chalta hai ki data.candles.get_candles() sirf
-    CLOSED (poori ban chuki) candles deta hai — yeh fix data/candles.py
-    mein already laga diya gaya hai (pehle sirf daily ke liye tha, ab
-    saari intraday resolutions ke liye bhi hai). Agar yeh assumption
-    galat nikle, toh yahan resolve hone wale outcomes bhi 1 candle
-    aage-peeche shift ho sakte hain — is module ko badalne ki zaroorat
-    nahi padegi, sirf candles.py ka fix sahi hona chahiye.
+IMPORTANT FIX (tolerance matching):
+    v1 mein candle-time ka EXACT match dhoondte the, jo GitHub Actions
+    ke late/early runs mein kabhi match hi nahi karta tha. Ab hum
+    "closest candle within tolerance" dhoondte hain — zyada robust hai.
 """
 
-import json
-import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -54,12 +43,17 @@ from google.oauth2.service_account import Credentials
 from data.candles import get_candles
 import config
 
-PENDING_FILE = os.path.join(os.path.dirname(__file__), "backtest_pending.json")
+
 HORIZONS = [1, 3, 5]           # candles baad check karna hai (15/45/75 min)
 RESOLUTION = "15"
 RESOLUTION_MINUTES = 15
-MAX_AGE_HOURS = 6              # itne ghante baad bhi resolve na ho paaye toh discard (pair delist/data-gap)
+MAX_AGE_HOURS = 6               # itne ghante baad bhi resolve na ho paaye toh discard
+MATCH_TOLERANCE_MINUTES = 7     # candle-time match karte waqt itni tolerance rakho
+
+PENDING_WORKSHEET_NAME = "Pending_Spikes"
 RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results"
+
+PENDING_HEADER = ["Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close"]
 
 RESULTS_HEADER = [
     "Pair", "Spike_Time_UTC", "Candle_Color", "Trigger_Type", "Spike_Close",
@@ -69,22 +63,67 @@ RESULTS_HEADER = [
 
 
 # ============================================
-# PENDING FILE HELPERS
+# GOOGLE SHEETS CONNECTION (dono tabs ke liye shared)
 # ============================================
-def _load_pending():
-    if not os.path.exists(PENDING_FILE):
-        return []
+
+_client = None
+_pending_ws = None
+_results_ws = None
+
+
+def _connect():
+    global _client
+    if _client is None:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_file(str(config.CREDENTIALS_FILE), scopes=scopes)
+        _client = gspread.authorize(creds)
+    return _client
+
+
+def _get_pending_worksheet():
+    global _pending_ws
+    if _pending_ws is not None:
+        return _pending_ws
+
+    client = _connect()
+    spreadsheet = client.open_by_key(config.SHEET_ID)
+
     try:
-        with open(PENDING_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
+        _pending_ws = spreadsheet.worksheet(PENDING_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        _pending_ws = spreadsheet.add_worksheet(
+            title=PENDING_WORKSHEET_NAME, rows=500, cols=len(PENDING_HEADER) + 2
+        )
+        _pending_ws.append_row(PENDING_HEADER)
+
+    return _pending_ws
 
 
-def _save_pending(entries):
-    with open(PENDING_FILE, "w") as f:
-        json.dump(entries, f, indent=2, default=str)
+def _get_results_worksheet():
+    global _results_ws
+    if _results_ws is not None:
+        return _results_ws
 
+    client = _connect()
+    spreadsheet = client.open_by_key(config.SHEET_ID)
+
+    try:
+        _results_ws = spreadsheet.worksheet(RESULTS_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        _results_ws = spreadsheet.add_worksheet(
+            title=RESULTS_WORKSHEET_NAME, rows=5000, cols=len(RESULTS_HEADER) + 2
+        )
+        _results_ws.append_row(RESULTS_HEADER)
+
+    return _results_ws
+
+
+# ============================================
+# HELPERS
+# ============================================
 
 def _to_utc_dt(value):
     """String ya pandas Timestamp ko tz-aware UTC datetime mein convert karta hai."""
@@ -94,90 +133,60 @@ def _to_utc_dt(value):
     return dt.to_pydatetime()
 
 
+def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES):
+    """
+    df ke 'Time' column mein target_time ke sabse paas wali candle dhoondta
+    hai, agar tolerance ke andar ho. Exact-match ki jagah ye zyada robust
+    hai (GitHub Actions ke late-run scenarios mein bhi kaam karega).
+
+    Return: (found: bool, close_price: float ya None)
+    """
+    df_times = df["Time"]
+    if df_times.dt.tz is None:
+        df_times = df_times.dt.tz_localize("UTC")
+
+    diffs = (df_times - target_time).abs()
+    min_idx = diffs.idxmin()
+    min_diff = diffs.loc[min_idx]
+
+    if min_diff <= timedelta(minutes=tolerance_minutes):
+        return True, float(df.loc[min_idx, "Close"])
+
+    return False, None
+
+
 # ============================================
 # PUBLIC: add_pending — naya spike track karna shuru karo
 # ============================================
+
 def add_pending(pair, trigger_type, candle_color, spike_time, spike_close):
-    entries = _load_pending()
-    entries.append({
-        "pair": pair,
-        "trigger_type": trigger_type,
-        "candle_color": candle_color,
-        "spike_time": str(_to_utc_dt(spike_time)),
-        "spike_close": float(spike_close),
-        "resolved": {str(h): None for h in HORIZONS},
-    })
-    _save_pending(entries)
-
-
-# ============================================
-# GOOGLE SHEETS — results tab
-# ============================================
-_sheets_client = None
-_results_ws = None
-
-
-def _get_results_worksheet():
-    global _sheets_client, _results_ws
-    if _results_ws is not None:
-        return _results_ws
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_file(str(config.CREDENTIALS_FILE), scopes=scopes)
-    _sheets_client = gspread.authorize(creds)
-    spreadsheet = _sheets_client.open_by_key(config.SHEET_ID)
-    try:
-        _results_ws = spreadsheet.worksheet(RESULTS_WORKSHEET_NAME)
-    except gspread.exceptions.WorksheetNotFound:
-        _results_ws = spreadsheet.add_worksheet(
-            title=RESULTS_WORKSHEET_NAME, rows=5000, cols=len(RESULTS_HEADER)
-        )
-        _results_ws.append_row(RESULTS_HEADER)
-    return _results_ws
-
-
-def _write_result_row(entry, dry_run=False):
-    r = entry["resolved"]
-    row = [
-        entry["pair"],
-        entry["spike_time"],
-        entry["candle_color"],
-        entry["trigger_type"],
-        entry["spike_close"],
-    ]
-    for h in HORIZONS:
-        val = r.get(str(h))
-        if val is None:
-            row += ["", ""]
-        else:
-            row += [val["price"], val["pct_change"]]
-
-    if dry_run:
-        print(f"  [backtest_tracker][DRY_RUN] Result row: {row}")
-        return
-
-    try:
-        ws = _get_results_worksheet()
-        ws.append_row(row)
-    except Exception as e:
-        print(f"  [backtest_tracker] Sheet mein result likhne mein error: {e}")
+    ws = _get_pending_worksheet()
+    ws.append_row([
+        pair,
+        trigger_type,
+        candle_color,
+        str(_to_utc_dt(spike_time)),
+        float(spike_close),
+    ])
 
 
 # ============================================
 # PUBLIC: resolve_pending — har run ki shuruaat mein call karo
 # ============================================
+
 def resolve_pending(dry_run=False):
-    entries = _load_pending()
-    if not entries:
+    pending_ws = _get_pending_worksheet()
+    records = pending_ws.get_all_records()
+
+    if not records:
+        print("  [backtest_tracker] Koi pending spike nahi hai.")
         return
 
     now_utc = datetime.now(timezone.utc)
-    still_pending = []
+    max_horizon = max(HORIZONS)
 
     # Pair-wise ek hi baar candles fetch karo (efficient)
-    pairs_needed = {e["pair"] for e in entries}
+    pairs_needed = {r["Pair"] for r in records}
     candle_cache = {}
     for pair in pairs_needed:
         try:
@@ -186,41 +195,84 @@ def resolve_pending(dry_run=False):
             print(f"  [backtest_tracker] {pair} candles fetch error: {e}")
             candle_cache[pair] = None
 
-    for entry in entries:
-        spike_time = _to_utc_dt(entry["spike_time"])
+    still_pending = []
+    resolved_count = 0
+    discarded_count = 0
 
-        # Bahut purana ho gaya (pair delist ho gaya ho sakta hai, ya data-gap) -> discard
+    for row in records:
+        pair = row["Pair"]
+        spike_time = _to_utc_dt(row["Spike_Time_UTC"])
+        spike_close = float(row["Spike_Close"])
+
+        # Bahut purana ho gaya (pair delist ho gaya ho sakta hai, data-gap) -> discard
         if now_utc - spike_time > timedelta(hours=MAX_AGE_HOURS):
-            print(f"  [backtest_tracker] {entry['pair']} @ {entry['spike_time']} stale ho gaya (>{MAX_AGE_HOURS}h), discard.")
+            print(f"  [backtest_tracker] {pair} @ {row['Spike_Time_UTC']} stale ho gaya "
+                  f"(>{MAX_AGE_HOURS}h), discard.")
+            discarded_count += 1
             continue
 
-        df = candle_cache.get(entry["pair"])
+        df = candle_cache.get(pair)
         if df is None or df.empty:
-            still_pending.append(entry)
+            still_pending.append(row)
             continue
 
-        df_times = df["Time"]
-        if df_times.dt.tz is None:
-            df_times = df_times.dt.tz_localize("UTC")
+        # Poore max_horizon (75 min) tak ki candle chahiye tabhi fully resolve hoga
+        max_target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon)
+        found_max, _ = _find_closest_candle(df, max_target_time)
 
+        if not found_max:
+            # Abhi itna time nahi guzra, agle run mein try karenge
+            still_pending.append(row)
+            continue
+
+        # Sab horizons ke liye price nikal lo
+        result_row = [
+            pair,
+            row["Spike_Time_UTC"],
+            row["Candle_Color"],
+            row["Trigger_Type"],
+            spike_close,
+        ]
+
+        all_found = True
         for h in HORIZONS:
-            key = str(h)
-            if entry["resolved"].get(key) is not None:
-                continue
             target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * h)
-            match_idx = df_times[df_times == target_time].index
-            if len(match_idx) == 0:
-                continue  # candle abhi tak aayi nahi (ya resolve hone ka wait hai)
-            price_after = float(df.loc[match_idx[0], "Close"])
-            pct_change = round(
-                (price_after - entry["spike_close"]) / entry["spike_close"] * 100, 3
-            )
-            entry["resolved"][key] = {"price": price_after, "pct_change": pct_change}
+            found, price = _find_closest_candle(df, target_time)
+            if not found:
+                all_found = False
+                break
+            pct_change = round((price - spike_close) / spike_close * 100, 3)
+            result_row += [price, pct_change]
 
-        if all(v is not None for v in entry["resolved"].values()):
-            print(f"  [backtest_tracker] RESOLVED: {entry['pair']} @ {entry['spike_time']}")
-            _write_result_row(entry, dry_run=dry_run)
+        if not all_found:
+            still_pending.append(row)
+            continue
+
+        # Fully resolved — result likh do
+        if dry_run:
+            print(f"  [backtest_tracker][DRY_RUN] RESOLVED: {result_row}")
         else:
-            still_pending.append(entry)
+            try:
+                _get_results_worksheet().append_row(result_row)
+            except Exception as e:
+                print(f"  [backtest_tracker] Results likhne mein error: {e}")
+                still_pending.append(row)  # fail hua to pending mein wapas rakho
+                continue
 
-    _save_pending(still_pending)
+        resolved_count += 1
+
+    # Pending_Spikes tab ko naye (updated) list se overwrite karo
+    if not dry_run:
+        try:
+            clean_rows = [[r["Pair"], r["Trigger_Type"], r["Candle_Color"],
+                            r["Spike_Time_UTC"], r["Spike_Close"]] for r in still_pending]
+            pending_ws.clear()
+            pending_ws.update([PENDING_HEADER] + clean_rows)
+        except Exception as e:
+            print(f"  [backtest_tracker] Pending_Spikes update karne mein error: {e}")
+    else:
+        print(f"  [backtest_tracker][DRY_RUN] Pending list update hoti: "
+              f"{len(still_pending)} still pending.")
+
+    print(f"  [backtest_tracker] Resolved: {resolved_count} | "
+          f"Still pending: {len(still_pending)} | Discarded (stale): {discarded_count}")

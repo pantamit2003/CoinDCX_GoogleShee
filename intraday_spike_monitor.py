@@ -54,7 +54,7 @@ import config
 # ============================================
 # CONFIG — pehle inhe apni marzi se set karo
 # ============================================
-DRY_RUN = False         # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
+DRY_RUN = True          # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
 RESOLUTION = "15"       # 15-min candles
 LOOKBACK_SHORT = 20     # ~5 hours ka baseline
 LOOKBACK_LONG = 96      # ~1 din ka baseline
@@ -62,7 +62,7 @@ LOOKBACK_LONG = 96      # ~1 din ka baseline
 RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye
 RVOL_LONG_THRESHOLD = 3.0    # RVOL_96 kam se kam itna hona chahiye
 
-MAX_PAIRS_TO_SCAN = 250   # None = saare active pairs, ya testing ke liye number daalo jaise 20
+MAX_PAIRS_TO_SCAN = 50    # None = saare active pairs, ya testing ke liye number daalo jaise 20
 SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
 
 WORKSHEET_NAME = "Intraday_Spike_Alerts"
@@ -263,10 +263,10 @@ def run_one_scan():
                     str(candle_time),
                     pair,
                     trigger_type,
-                    close,
-                    volume,
-                    round(rvol_20, 2),
-                    round(rvol_96, 2),
+                    float(close),
+                    float(volume),
+                    round(float(rvol_20), 2),
+                    round(float(rvol_96), 2),
                 ])
 
                 # ---- BACKTEST: is spike ko track karna shuru karo, taaki

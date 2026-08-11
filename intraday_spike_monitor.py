@@ -22,14 +22,13 @@ Teeno mutually-exclusive categories hain (ek candle ek hi category mein
 aayegi), taaki Sheet mein baad mein easily filter/group karke dekh sako
 ki kis type ne kitna accurate signal diya.
 
-Har category ka apna alert jaata hai (Telegram + Sheet), "Trigger_Type"
-column ke saath — taaki pata chale konsi condition(s) trigger hui.
+Sheet mein — SAARI teeno categories (SHORT_ONLY, LONG_ONLY, BOTH) likhi
+jaati hain, backtesting ke liye poora data chahiye.
 
-GITHUB ACTIONS VERSION:
-Ye script ab EK BAAR scan karke exit ho jaati hai (infinite loop hata di
-gayi hai). GitHub Actions ka cron schedule (*/15 * * * *) khud har 15
-minute pe naya run trigger karega — script ko khud wait/loop karne ki
-zaroorat nahi.
+Telegram pe — SIRF wahi coins jaate hain jinka RVOL_20 (short-term) kam
+se kam RVOL_SHORT_THRESHOLD (abhi 6.0) ho. Agar RVOL_20 isse kam hai
+(chahe RVOL_96 kitna bhi bada ho, jaise LONG_ONLY case), Telegram pe
+nahi jaayega — sirf Sheet mein record hoga.
 
 CHALANE KA TARIKA (local testing ke liye bhi):
     python intraday_spike_monitor.py
@@ -58,8 +57,13 @@ RESOLUTION = "15"       # 15-min candles
 LOOKBACK_SHORT = 20     # ~5 hours ka baseline
 LOOKBACK_LONG = 96      # ~1 din ka baseline
 
-RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye
-RVOL_LONG_THRESHOLD = 3.0    # RVOL_96 kam se kam itna hona chahiye
+RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye (Sheet/classification ke liye)
+RVOL_LONG_THRESHOLD = 3.0    # RVOL_96 kam se kam itna hona chahiye (Sheet/classification ke liye)
+
+# NAYA: Telegram alert sirf tab jaaye jab RVOL_20 (short-term) kam se kam
+# itna ho — chahe Sheet classification mein SHORT_ONLY/LONG_ONLY/BOTH kuch
+# bhi ho, agar RVOL_20 is threshold se kam hai to Telegram pe skip.
+TELEGRAM_RVOL_20_MIN = 6.0
 
 MAX_PAIRS_TO_SCAN = 250    # None = saare active pairs, ya testing ke liye number daalo jaise 20
 SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
@@ -208,6 +212,7 @@ def run_one_scan():
 
     # Backtesting ke liye har category ka alag count rakho
     counts = {"SHORT_ONLY": 0, "LONG_ONLY": 0, "BOTH": 0}
+    telegram_sent_count = 0
 
     for pair in pairs:
         try:
@@ -226,26 +231,25 @@ def run_one_scan():
             if pd.isna(rvol_20) or pd.isna(rvol_96):
                 continue
 
-            # ---- 3 INDEPENDENT CONDITIONS check karo ----
+            # numpy types ko yahin Python native mein convert kar do —
+            # aage Sheet aur calculations dono ke liye safe rahega
+            rvol_20 = float(rvol_20)
+            rvol_96 = float(rvol_96)
+
+            # ---- 3 INDEPENDENT CONDITIONS check karo (Sheet ke liye) ----
             trigger_type = classify_trigger_type(rvol_20, rvol_96)
 
             if trigger_type is not None:
                 counts[trigger_type] += 1
 
                 candle_time = last_row["Time"]
-                close = last_row["Close"]
-                volume = last_row["Volume"]
+                close = float(last_row["Close"])
+                volume = float(last_row["Volume"])
 
                 print(f"  🚨 [{trigger_type}] {pair} | RVOL_20={rvol_20:.2f} RVOL_96={rvol_96:.2f} "
                       f"| Close={close} | Time={candle_time}")
 
-                message = build_alert_message(pair, trigger_type, candle_time, close, volume, rvol_20, rvol_96)
-
-                if DRY_RUN:
-                    print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
-                else:
-                    send_telegram_message(message)
-
+                # ---- SHEET: hamesha likho, jo bhi trigger_type ho ----
                 detected_at_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime(
                     "%Y-%m-%d %H:%M:%S"
                 )
@@ -260,6 +264,19 @@ def run_one_scan():
                     round(rvol_96, 2),
                 ])
 
+                # ---- TELEGRAM: sirf tab jab RVOL_20 >= TELEGRAM_RVOL_20_MIN ----
+                if rvol_20 >= TELEGRAM_RVOL_20_MIN:
+                    telegram_sent_count += 1
+                    message = build_alert_message(pair, trigger_type, candle_time, close, volume, rvol_20, rvol_96)
+
+                    if DRY_RUN:
+                        print(f"  [DRY_RUN] Telegram message bhejta (RVOL_20={rvol_20:.2f} >= {TELEGRAM_RVOL_20_MIN}):\n{message}\n")
+                    else:
+                        send_telegram_message(message)
+                else:
+                    print(f"  (Telegram skip — RVOL_20={rvol_20:.2f} < {TELEGRAM_RVOL_20_MIN}, "
+                          f"sirf Sheet mein gaya)")
+
             time.sleep(SLEEP_BETWEEN_PAIRS)
 
         except Exception as e:
@@ -267,8 +284,9 @@ def run_one_scan():
             continue
 
     total_alerts = sum(counts.values())
-    print(f"\nScan complete. {total_alerts} spike(s) mile — "
+    print(f"\nScan complete. {total_alerts} spike(s) mile (Sheet mein sab gaye) — "
           f"BOTH: {counts['BOTH']}, SHORT_ONLY: {counts['SHORT_ONLY']}, LONG_ONLY: {counts['LONG_ONLY']}")
+    print(f"Telegram pe bheje gaye: {telegram_sent_count} (sirf RVOL_20 >= {TELEGRAM_RVOL_20_MIN} wale)")
 
 
 # ============================================
@@ -303,6 +321,7 @@ if __name__ == "__main__":
     # scan chalao aur exit ho jao.
     print("Intraday Spike Monitor — single scan (GitHub Actions mode)")
     print(f"DRY_RUN = {DRY_RUN}  (True matlab abhi kuch bhejega nahi, sirf test)")
-    print(f"3 independent conditions track ho rahi hain: SHORT_ONLY, LONG_ONLY, BOTH\n")
+    print(f"3 independent conditions track ho rahi hain: SHORT_ONLY, LONG_ONLY, BOTH")
+    print(f"Telegram sirf RVOL_20 >= {TELEGRAM_RVOL_20_MIN} wale coins ke liye jaayega\n")
 
     run_one_scan()

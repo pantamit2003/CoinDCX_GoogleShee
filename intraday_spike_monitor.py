@@ -54,7 +54,7 @@ import config
 # ============================================
 # CONFIG — pehle inhe apni marzi se set karo
 # ============================================
-DRY_RUN = True          # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
+DRY_RUN = False         # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
 RESOLUTION = "15"       # 15-min candles
 LOOKBACK_SHORT = 20     # ~5 hours ka baseline
 LOOKBACK_LONG = 96      # ~1 din ka baseline

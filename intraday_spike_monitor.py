@@ -53,7 +53,7 @@ import config
 # ============================================
 # CONFIG — pehle inhe apni marzi se set karo
 # ============================================
-DRY_RUN = True          # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
+DRY_RUN = False          # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
 RESOLUTION = "15"       # 15-min candles
 LOOKBACK_SHORT = 20     # ~5 hours ka baseline
 LOOKBACK_LONG = 96      # ~1 din ka baseline
@@ -61,7 +61,7 @@ LOOKBACK_LONG = 96      # ~1 din ka baseline
 RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye
 RVOL_LONG_THRESHOLD = 3.0    # RVOL_96 kam se kam itna hona chahiye
 
-MAX_PAIRS_TO_SCAN = None    # None = saare active pairs, ya testing ke liye number daalo jaise 20
+MAX_PAIRS_TO_SCAN = 250    # None = saare active pairs, ya testing ke liye number daalo jaise 20
 SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
 
 WORKSHEET_NAME = "Intraday_Spike_Alerts"

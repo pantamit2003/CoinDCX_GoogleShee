@@ -40,12 +40,12 @@ jobs:
       - name: Run intraday_spike_monitor.py
         run: python intraday_spike_monitor.py
 
-      - name: Commit updated tracking files back to repo
+      - name: Commit updated tracking files
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
-          git add backtest_pending.json spike_freshness_history.json volume_watchlist.json
+          git add backtest_pending.json volume_watchlist.json
 
           if git diff --cached --quiet; then
             echo "No tracking-file changes."

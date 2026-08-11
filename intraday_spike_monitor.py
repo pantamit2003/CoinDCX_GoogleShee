@@ -5,7 +5,7 @@ NAYA STANDALONE SCRIPT — existing check_watchlist.py / daily_breakout_scan.py 
 volume_watch.py ko bilkul touch nahi karta.
 
 KYA KARTA HAI:
-- Har 15 minute pe (candle-boundary ke thodi der baad) apne aap chalta hai
+- Har 15 minute pe (GitHub Actions cron ke through) chalta hai
 - Saare active futures pairs ke 15-min candles CoinDCX se laata hai
 - Sirf abhi-abhi CLOSE hui candle ka RVOL check karta hai (RVOL_20 aur RVOL_96)
 
@@ -25,10 +25,14 @@ ki kis type ne kitna accurate signal diya.
 Har category ka apna alert jaata hai (Telegram + Sheet), "Trigger_Type"
 column ke saath — taaki pata chale konsi condition(s) trigger hui.
 
-CHALANE KA TARIKA:
-    python intraday_spike_monitor.py
+GITHUB ACTIONS VERSION:
+Ye script ab EK BAAR scan karke exit ho jaati hai (infinite loop hata di
+gayi hai). GitHub Actions ka cron schedule (*/15 * * * *) khud har 15
+minute pe naya run trigger karega — script ko khud wait/loop karne ki
+zaroorat nahi.
 
-Ye script infinite loop mein chalti rahegi jab tak aap Ctrl+C na dabao.
+CHALANE KA TARIKA (local testing ke liye bhi):
+    python intraday_spike_monitor.py
 
 TESTING TIP:
 Pehli baar chalate waqt DRY_RUN = True rakho (neeche config mein) — isse
@@ -268,7 +272,9 @@ def run_one_scan():
 
 
 # ============================================
-# 15-MIN LOOP — candle boundary (00/15/30/45) ke thodi der baad chalta hai
+# (Ab use nahi ho raha GitHub Actions mode mein, lekin agar kabhi
+# manually apne PC pe chalana pade to isse loop bana sakte ho —
+# isliye function rakha hua hai, delete nahi kiya.)
 # ============================================
 def seconds_until_next_run():
     """
@@ -287,17 +293,16 @@ def seconds_until_next_run():
     return (next_run - now).total_seconds()
 
 
+# ============================================
+# ENTRY POINT — is se 0 indent pe hona ZAROORI hai (function ke andar nahi)
+# ============================================
 if __name__ == "__main__":
-    print("Intraday Spike Monitor shuru ho raha hai.")
+    # GITHUB ACTIONS VERSION — infinite loop hata di gayi hai.
+    # GitHub Actions khud cron se har 15 min pe naya run trigger karega,
+    # isliye script ko khud loop/wait karne ki zaroorat nahi — bas ek
+    # scan chalao aur exit ho jao.
+    print("Intraday Spike Monitor — single scan (GitHub Actions mode)")
     print(f"DRY_RUN = {DRY_RUN}  (True matlab abhi kuch bhejega nahi, sirf test)")
-    print(f"3 independent conditions track ho rahi hain: SHORT_ONLY, LONG_ONLY, BOTH")
-    print("Ctrl+C dabao rokne ke liye.\n")
+    print(f"3 independent conditions track ho rahi hain: SHORT_ONLY, LONG_ONLY, BOTH\n")
 
-    # Pehla scan turant chalao (test ke liye), phir 15-min loop shuru karo
     run_one_scan()
-
-    while True:
-        wait_seconds = seconds_until_next_run()
-        print(f"\nAgla scan {wait_seconds / 60:.1f} minute mein hoga...")
-        time.sleep(wait_seconds)
-        run_one_scan()

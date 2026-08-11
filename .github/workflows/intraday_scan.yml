@@ -2,7 +2,7 @@ name: Intraday Volume Spike Monitor
 
 on:
   schedule:
-    - cron: '1,16,31,46 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -39,18 +39,3 @@ jobs:
 
       - name: Run intraday_spike_monitor.py
         run: python intraday_spike_monitor.py
-
-      - name: Commit updated tracking files
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-
-          git add backtest_pending.json volume_watchlist.json
-
-          if git diff --cached --quiet; then
-            echo "No tracking-file changes."
-          else
-            git commit -m "Auto-update tracking files"
-            git pull --rebase origin main
-            git push
-          fi

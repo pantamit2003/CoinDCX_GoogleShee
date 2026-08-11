@@ -2,7 +2,7 @@ name: Intraday Volume Spike Monitor
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '1,16,31,46 * * * *'
   workflow_dispatch:
 
 permissions:

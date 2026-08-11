@@ -62,7 +62,7 @@ LOOKBACK_LONG = 96      # ~1 din ka baseline
 RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye
 RVOL_LONG_THRESHOLD = 3.0    # RVOL_96 kam se kam itna hona chahiye
 
-MAX_PAIRS_TO_SCAN = 50    # None = saare active pairs, ya testing ke liye number daalo jaise 20
+MAX_PAIRS_TO_SCAN = 250    # None = saare active pairs, ya testing ke liye number daalo jaise 20
 SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
 
 WORKSHEET_NAME = "Intraday_Spike_Alerts"

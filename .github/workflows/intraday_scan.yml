@@ -11,6 +11,7 @@ permissions:
 jobs:
   run-scan:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -43,7 +44,13 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add backtest_pending.json spike_freshness_history.json volume_watchlist.json 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "Auto-update tracking files [skip ci]"
-          git pull --rebase origin HEAD || true
-          git push || true
+
+          git add backtest_pending.json spike_freshness_history.json volume_watchlist.json
+
+          if git diff --cached --quiet; then
+            echo "No tracking-file changes."
+          else
+            git commit -m "Auto-update tracking files"
+            git pull --rebase origin main
+            git push
+          fi

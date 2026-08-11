@@ -1,0 +1,303 @@
+"""
+intraday_spike_monitor.py
+==========================
+NAYA STANDALONE SCRIPT — existing check_watchlist.py / daily_breakout_scan.py /
+volume_watch.py ko bilkul touch nahi karta.
+
+KYA KARTA HAI:
+- Har 15 minute pe (candle-boundary ke thodi der baad) apne aap chalta hai
+- Saare active futures pairs ke 15-min candles CoinDCX se laata hai
+- Sirf abhi-abhi CLOSE hui candle ka RVOL check karta hai (RVOL_20 aur RVOL_96)
+
+BACKTESTING KE LIYE — 3 INDEPENDENT CONDITIONS:
+Ab hum ek hi combined (AND) condition pe bharosa nahi karte. Teeno alag-alag
+check hote hain, taaki baad mein backtest karke pata chale kaunsa rule
+sabse zyada reliable/profitable hai:
+
+    1. SHORT_ONLY — sirf RVOL_20 >= threshold pass hua, RVOL_96 nahi
+    2. LONG_ONLY  — sirf RVOL_96 >= threshold pass hua, RVOL_20 nahi
+    3. BOTH       — dono RVOL_20 aur RVOL_96 pass hue (sabse strict)
+
+Teeno mutually-exclusive categories hain (ek candle ek hi category mein
+aayegi), taaki Sheet mein baad mein easily filter/group karke dekh sako
+ki kis type ne kitna accurate signal diya.
+
+Har category ka apna alert jaata hai (Telegram + Sheet), "Trigger_Type"
+column ke saath — taaki pata chale konsi condition(s) trigger hui.
+
+CHALANE KA TARIKA:
+    python intraday_spike_monitor.py
+
+Ye script infinite loop mein chalti rahegi jab tak aap Ctrl+C na dabao.
+
+TESTING TIP:
+Pehli baar chalate waqt DRY_RUN = True rakho (neeche config mein) — isse
+Telegram/Sheet pe kuch nahi jayega, sirf console mein print hoga taaki aap
+dekh sako results sahi aa rahe hain ya nahi.
+"""
+import time
+from datetime import datetime, timezone, timedelta
+import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
+
+from data.candles import get_candles
+from exchange.coindcx import get_active_pairs
+from notifications.telegram_bot import send_telegram_message
+import config
+
+# ============================================
+# CONFIG — pehle inhe apni marzi se set karo
+# ============================================
+DRY_RUN = True          # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
+RESOLUTION = "15"       # 15-min candles
+LOOKBACK_SHORT = 20     # ~5 hours ka baseline
+LOOKBACK_LONG = 96      # ~1 din ka baseline
+
+RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye
+RVOL_LONG_THRESHOLD = 3.0    # RVOL_96 kam se kam itna hona chahiye
+
+MAX_PAIRS_TO_SCAN = 50    # None = saare active pairs, ya testing ke liye number daalo jaise 20
+SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
+
+WORKSHEET_NAME = "Intraday_Spike_Alerts"
+
+# Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
+# Khaali list [] rakhoge to MAX_PAIRS_TO_SCAN / active pairs use honge.
+TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]
+
+# Sheet header — ab "Trigger_Type" column bhi add hua hai
+SHEET_HEADER = [
+    "Detected_At_IST", "Candle_Time_UTC", "Pair", "Trigger_Type",
+    "Close", "Volume", "RVOL_20", "RVOL_96",
+]
+
+
+# ============================================
+# RVOL CALCULATION
+# ============================================
+def get_intraday_rvol(df, lookback_periods):
+    """
+    Har candle ka RVOL nikalta hai, uske pichle N candles ke average se
+    compare karke. shift(1) isliye taaki current candle apne khud ke
+    average mein shaamil na ho.
+    """
+    df = df.copy()
+    for period in lookback_periods:
+        avg_col = f"avg_vol_{period}"
+        df[avg_col] = df["Volume"].rolling(window=period).mean().shift(1)
+        rvol_col = f"RVOL_{period}"
+        df[rvol_col] = df["Volume"] / df[avg_col]
+        df.drop(columns=[avg_col], inplace=True)
+    return df
+
+
+# ============================================
+# 3 INDEPENDENT CONDITIONS — backtesting ke liye alag-alag
+# ============================================
+def classify_trigger_type(rvol_20, rvol_96):
+    """
+    Teen mutually-exclusive categories mein classify karta hai.
+    Return: trigger_type string, ya None agar koi bhi condition pass
+    nahi hui.
+
+    SHORT_ONLY = sirf short-term threshold pass hua
+    LONG_ONLY  = sirf long-term threshold pass hua
+    BOTH       = dono pass hue (sabse strict/reliable)
+    """
+    cond_short = rvol_20 >= RVOL_SHORT_THRESHOLD
+    cond_long = rvol_96 >= RVOL_LONG_THRESHOLD
+
+    if cond_short and cond_long:
+        return "BOTH"
+    elif cond_short:
+        return "SHORT_ONLY"
+    elif cond_long:
+        return "LONG_ONLY"
+    else:
+        return None
+
+
+# ============================================
+# GOOGLE SHEETS — append helper (naya tab, existing tabs ko touch nahi karta)
+# ============================================
+_sheets_client = None
+_worksheet = None
+
+
+def _get_worksheet():
+    global _sheets_client, _worksheet
+    if _worksheet is not None:
+        return _worksheet
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_file(str(config.CREDENTIALS_FILE), scopes=scopes)
+    _sheets_client = gspread.authorize(creds)
+    spreadsheet = _sheets_client.open_by_key(config.SHEET_ID)
+
+    try:
+        _worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        _worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=10)
+        _worksheet.append_row(SHEET_HEADER)
+
+    return _worksheet
+
+
+def log_to_sheet(row_values):
+    if DRY_RUN:
+        print(f"  [DRY_RUN] Sheet mein ye row jaati: {row_values}")
+        return
+    try:
+        ws = _get_worksheet()
+        ws.append_row(row_values)
+    except Exception as e:
+        print(f"  Google Sheet mein likhne mein error: {e}")
+
+
+# ============================================
+# ALERT MESSAGE
+# ============================================
+def build_alert_message(pair, trigger_type, candle_time, close, volume, rvol_20, rvol_96):
+    trigger_note = {
+        "BOTH": "Dono short aur medium-term baseline confirm kar rahe hain — sabse strong signal.",
+        "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
+        "LONG_ONLY": "Sirf medium-term (1 din) baseline confirm kar raha hai — short-term abhi threshold cross nahi kiya. Dheere-dheere build ho raha volume ho sakta hai.",
+    }.get(trigger_type, "")
+
+    return (
+        f"🚨 <b>INTRADAY VOLUME SPIKE — {trigger_type}</b>\n\n"
+        f"<b>Pair:</b> {pair}\n"
+        f"<b>Candle Time (UTC):</b> {candle_time}\n"
+        f"<b>Close:</b> {close}\n"
+        f"<b>Volume:</b> {volume:,.0f}\n"
+        f"<b>RVOL_20:</b> {rvol_20:.2f}x\n"
+        f"<b>RVOL_96:</b> {rvol_96:.2f}x\n\n"
+        f"{trigger_note}\n"
+        f"Khud verify karke decide karo."
+    )
+
+
+# ============================================
+# EK SCAN CYCLE
+# ============================================
+def run_one_scan():
+    print(f"\n{'=' * 60}")
+    print(f"SCAN STARTED: {datetime.now()}")
+    print('=' * 60)
+
+    if TEST_ONLY_PAIRS:
+        pairs = TEST_ONLY_PAIRS
+    else:
+        try:
+            pairs = get_active_pairs()
+        except Exception as e:
+            print(f"Active pairs laane mein error: {e}")
+            return
+        if MAX_PAIRS_TO_SCAN:
+            pairs = pairs[:MAX_PAIRS_TO_SCAN]
+
+    print(f"Scanning {len(pairs)} pairs...")
+
+    # Backtesting ke liye har category ka alag count rakho
+    counts = {"SHORT_ONLY": 0, "LONG_ONLY": 0, "BOTH": 0}
+
+    for pair in pairs:
+        try:
+            df = get_candles(pair=pair, resolution=RESOLUTION, days=2)
+            if df.empty or len(df) < LOOKBACK_LONG + 1:
+                # Itna data nahi hai reliable RVOL_96 nikalne ke liye
+                continue
+
+            result = get_intraday_rvol(df, lookback_periods=[LOOKBACK_SHORT, LOOKBACK_LONG])
+
+            # Sirf sabse latest (abhi-abhi close hui) candle check karo
+            last_row = result.iloc[-1]
+            rvol_20 = last_row[f"RVOL_{LOOKBACK_SHORT}"]
+            rvol_96 = last_row[f"RVOL_{LOOKBACK_LONG}"]
+
+            if pd.isna(rvol_20) or pd.isna(rvol_96):
+                continue
+
+            # ---- 3 INDEPENDENT CONDITIONS check karo ----
+            trigger_type = classify_trigger_type(rvol_20, rvol_96)
+
+            if trigger_type is not None:
+                counts[trigger_type] += 1
+
+                candle_time = last_row["Time"]
+                close = last_row["Close"]
+                volume = last_row["Volume"]
+
+                print(f"  🚨 [{trigger_type}] {pair} | RVOL_20={rvol_20:.2f} RVOL_96={rvol_96:.2f} "
+                      f"| Close={close} | Time={candle_time}")
+
+                message = build_alert_message(pair, trigger_type, candle_time, close, volume, rvol_20, rvol_96)
+
+                if DRY_RUN:
+                    print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
+                else:
+                    send_telegram_message(message)
+
+                detected_at_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                log_to_sheet([
+                    detected_at_ist,
+                    str(candle_time),
+                    pair,
+                    trigger_type,
+                    close,
+                    volume,
+                    round(rvol_20, 2),
+                    round(rvol_96, 2),
+                ])
+
+            time.sleep(SLEEP_BETWEEN_PAIRS)
+
+        except Exception as e:
+            print(f"  {pair} pe error aaya, skip kar rahe hain: {e}")
+            continue
+
+    total_alerts = sum(counts.values())
+    print(f"\nScan complete. {total_alerts} spike(s) mile — "
+          f"BOTH: {counts['BOTH']}, SHORT_ONLY: {counts['SHORT_ONLY']}, LONG_ONLY: {counts['LONG_ONLY']}")
+
+
+# ============================================
+# 15-MIN LOOP — candle boundary (00/15/30/45) ke thodi der baad chalta hai
+# ============================================
+def seconds_until_next_run():
+    """
+    Agla 15-min boundary (:00, :15, :30, :45) dhoondta hai aur us se
+    30 second baad ka time return karta hai (taaki CoinDCX API ko candle
+    close hone ke baad thoda time mile data update karne ke liye).
+    """
+    now = datetime.now()
+    minute = now.minute
+    next_boundary_minute = ((minute // 15) + 1) * 15
+    if next_boundary_minute >= 60:
+        next_run = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+    else:
+        next_run = now.replace(minute=next_boundary_minute, second=0, microsecond=0)
+    next_run += timedelta(seconds=30)  # buffer
+    return (next_run - now).total_seconds()
+
+
+if __name__ == "__main__":
+    print("Intraday Spike Monitor shuru ho raha hai.")
+    print(f"DRY_RUN = {DRY_RUN}  (True matlab abhi kuch bhejega nahi, sirf test)")
+    print(f"3 independent conditions track ho rahi hain: SHORT_ONLY, LONG_ONLY, BOTH")
+    print("Ctrl+C dabao rokne ke liye.\n")
+
+    # Pehla scan turant chalao (test ke liye), phir 15-min loop shuru karo
+    run_one_scan()
+
+    while True:
+        wait_seconds = seconds_until_next_run()
+        print(f"\nAgla scan {wait_seconds / 60:.1f} minute mein hoga...")
+        time.sleep(wait_seconds)
+        run_one_scan()

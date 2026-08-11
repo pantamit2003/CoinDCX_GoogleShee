@@ -76,6 +76,29 @@ class CandleData:
             if last_candle_date == today_utc:
                 df = df.iloc[:-1].reset_index(drop=True)
 
+        # ---- INTRADAY resolutions (15, 5, 60, etc.) ke liye bhi wahi
+        # cheez — pehle yeh check sirf daily ke liye tha, isliye 15-min
+        # jaisi resolutions mein last row abhi-abhi ban rahi (incomplete)
+        # candle ho sakti thi. Ab yahan bhi: last candle ka expected
+        # close-time (Time + resolution minutes) nikalo, agar abhi tak
+        # woh time nahi aaya, matlab candle abhi live/forming hai -> hata
+        # do. Isse .iloc[-1] hamesha ek guaranteed CLOSED candle hoga,
+        # chahe koi bhi resolution use ho rahi ho. ----
+        elif not df.empty:
+            try:
+                resolution_minutes = int(resolution)
+            except ValueError:
+                resolution_minutes = None  # koi anjaan resolution string, skip
+
+            if resolution_minutes:
+                last_candle_time = df["Time"].iloc[-1]
+                if last_candle_time.tzinfo is None:
+                    last_candle_time = last_candle_time.tz_localize("UTC")
+                expected_close = last_candle_time + pd.Timedelta(minutes=resolution_minutes)
+                now_utc = datetime.now(timezone.utc)
+                if now_utc < expected_close:
+                    df = df.iloc[:-1].reset_index(drop=True)
+
         return df
 
 

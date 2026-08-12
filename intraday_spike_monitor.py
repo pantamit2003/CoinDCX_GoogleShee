@@ -347,6 +347,7 @@ def run_one_scan():
                         spike_time=candle_time,
                         spike_close=close,
                         price_position=price_position,
+                        rvol_20=rvol_20,
                     )
                 except Exception as e:
                     print(f"  [backtest_tracker] add_pending mein error: {e}")

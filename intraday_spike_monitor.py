@@ -65,7 +65,7 @@ LOOKBACK_SHORT = 20     # ~5 hours ka baseline
 LOOKBACK_LONG = 96      # ~1 din ka baseline
 
 RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye (Sheet-logging ke liye)
-RVOL_LONG_THRESHOLD = 3.0    # RVOL_96 kam se kam itna hona chahiye (Sheet-logging ke liye)
+RVOL_LONG_THRESHOLD = 6.0   # RVOL_96 kam se kam itna hona chahiye (Sheet-logging ke liye)
 
 RVOL_20_ALERT_THRESHOLD = 6.0   # Telegram alert SIRF tabhi jayega jab RVOL_20 isse zyada ho
                                   # (RVOL_96 kuch bhi ho, koi restriction nahi)

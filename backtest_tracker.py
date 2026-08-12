@@ -53,10 +53,10 @@ MATCH_TOLERANCE_MINUTES = 7     # candle-time match karte waqt itni tolerance ra
 PENDING_WORKSHEET_NAME = "Pending_Spikes"
 RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results"
 
-PENDING_HEADER = ["Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close"]
+PENDING_HEADER = ["Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close", "Price_Position"]
 
 RESULTS_HEADER = [
-    "Pair", "Spike_Time_UTC", "Candle_Color", "Trigger_Type", "Spike_Close",
+    "Pair", "Spike_Time_UTC", "Candle_Color", "Trigger_Type", "Spike_Close", "Price_Position",
     "Price_After_1", "PctChg_1", "Price_After_3", "PctChg_3",
     "Price_After_5", "PctChg_5",
 ]
@@ -159,7 +159,7 @@ def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINU
 # PUBLIC: add_pending — naya spike track karna shuru karo
 # ============================================
 
-def add_pending(pair, trigger_type, candle_color, spike_time, spike_close):
+def add_pending(pair, trigger_type, candle_color, spike_time, spike_close, price_position="UNKNOWN"):
     ws = _get_pending_worksheet()
     ws.append_row([
         pair,
@@ -167,6 +167,7 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close):
         candle_color,
         str(_to_utc_dt(spike_time)),
         float(spike_close),
+        price_position,
     ])
 
 
@@ -232,6 +233,7 @@ def resolve_pending(dry_run=False):
             row["Candle_Color"],
             row["Trigger_Type"],
             spike_close,
+            row.get("Price_Position", "UNKNOWN"),
         ]
 
         all_found = True
@@ -265,7 +267,8 @@ def resolve_pending(dry_run=False):
     if not dry_run:
         try:
             clean_rows = [[r["Pair"], r["Trigger_Type"], r["Candle_Color"],
-                            r["Spike_Time_UTC"], r["Spike_Close"]] for r in still_pending]
+                            r["Spike_Time_UTC"], r["Spike_Close"],
+                            r.get("Price_Position", "UNKNOWN")] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)
         except Exception as e:

@@ -41,6 +41,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from data.candles import get_candles
+from notifications.telegram_bot import send_telegram_message
 import config
 
 
@@ -53,13 +54,16 @@ MATCH_TOLERANCE_MINUTES = 7     # candle-time match karte waqt itni tolerance ra
 PENDING_WORKSHEET_NAME = "Pending_Spikes"
 RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results"
 
-PENDING_HEADER = ["Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close", "Price_Position"]
+PENDING_HEADER = ["Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close",
+                   "Price_Position", "RVOL_20", "Confirmation_Status"]
 
 RESULTS_HEADER = [
     "Pair", "Spike_Time_UTC", "Candle_Color", "Trigger_Type", "Spike_Close", "Price_Position",
     "Price_After_1", "PctChg_1", "Price_After_3", "PctChg_3",
-    "Price_After_5", "PctChg_5",
+    "Price_After_5", "PctChg_5", "Confirmation_Status",
 ]
+
+CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0   # sirf strong-signal spikes ko hi confirmation-alert bhejo
 
 
 # ============================================
@@ -141,6 +145,20 @@ def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINU
 
     Return: (found: bool, close_price: float ya None)
     """
+    found, row = _find_closest_row(df, target_time, tolerance_minutes)
+    if found:
+        return True, float(row["Close"])
+    return False, None
+
+
+def _find_closest_row(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES):
+    """
+    Same as _find_closest_candle, lekin poori row (Open/High/Low/Close)
+    return karta hai — confirmation-candle logic ko High/Low bhi chahiye,
+    sirf Close nahi.
+
+    Return: (found: bool, row ya None)
+    """
     df_times = df["Time"]
     if df_times.dt.tz is None:
         df_times = df_times.dt.tz_localize("UTC")
@@ -150,16 +168,60 @@ def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINU
     min_diff = diffs.loc[min_idx]
 
     if min_diff <= timedelta(minutes=tolerance_minutes):
-        return True, float(df.loc[min_idx, "Close"])
+        return True, df.loc[min_idx]
 
     return False, None
+
+
+def _check_breakout_confirmation(df, spike_time, candle_color):
+    """
+    NAYA — 'confirmation candle' logic:
+    - Candle N+1 (spike ke 15 min baad) = "indecision candle", uska High/Low note karo
+    - Candle N+2 (spike ke 30 min baad) = "confirmation candle"
+    - Agar N+2 ki High, N+1 ki High se upar nikal gayi -> CONFIRMED_CONTINUATION
+    - Agar N+2 ki Low, N+1 ki Low se neeche gayi -> FAILED_BREAKOUT
+    - Dono nahi tuti -> STILL_UNDECIDED
+    - Agar N+2 ki candle abhi data mein nahi aayi -> None (abhi wait karo)
+
+    Return: confirmation_status string, ya None agar abhi determine nahi ho sakta
+    """
+    target_n1 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 1)
+    target_n2 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 2)
+
+    found_n1, row_n1 = _find_closest_row(df, target_n1)
+    found_n2, row_n2 = _find_closest_row(df, target_n2)
+
+    if not found_n1 or not found_n2:
+        return None  # abhi itna time nahi guzra
+
+    high_n1, low_n1 = float(row_n1["High"]), float(row_n1["Low"])
+    high_n2, low_n2 = float(row_n2["High"]), float(row_n2["Low"])
+
+    broke_high = high_n2 > high_n1
+    broke_low = low_n2 < low_n1
+
+    if candle_color == "GREEN":
+        if broke_high:
+            return "CONFIRMED_CONTINUATION"
+        elif broke_low:
+            return "FAILED_BREAKOUT"
+        else:
+            return "STILL_UNDECIDED"
+    else:
+        if broke_low:
+            return "CONFIRMED_CONTINUATION"
+        elif broke_high:
+            return "FAILED_BREAKOUT"
+        else:
+            return "STILL_UNDECIDED"
 
 
 # ============================================
 # PUBLIC: add_pending — naya spike track karna shuru karo
 # ============================================
 
-def add_pending(pair, trigger_type, candle_color, spike_time, spike_close, price_position="UNKNOWN"):
+def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
+                 price_position="UNKNOWN", rvol_20=0.0):
     ws = _get_pending_worksheet()
     ws.append_row([
         pair,
@@ -168,6 +230,8 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close, price
         str(_to_utc_dt(spike_time)),
         float(spike_close),
         price_position,
+        round(float(rvol_20), 2),
+        "PENDING",   # Confirmation_Status shuru mein hamesha PENDING
     ])
 
 
@@ -199,11 +263,15 @@ def resolve_pending(dry_run=False):
     still_pending = []
     resolved_count = 0
     discarded_count = 0
+    confirmation_sent_count = 0
 
     for row in records:
         pair = row["Pair"]
         spike_time = _to_utc_dt(row["Spike_Time_UTC"])
         spike_close = float(row["Spike_Close"])
+        candle_color = row["Candle_Color"]
+        rvol_20 = float(row.get("RVOL_20", 0) or 0)
+        confirmation_status = row.get("Confirmation_Status", "PENDING")
 
         # Bahut purana ho gaya (pair delist ho gaya ho sakta hai, data-gap) -> discard
         if now_utc - spike_time > timedelta(hours=MAX_AGE_HOURS):
@@ -216,6 +284,33 @@ def resolve_pending(dry_run=False):
         if df is None or df.empty:
             still_pending.append(row)
             continue
+
+        # ---- CONFIRMATION-CANDLE CHECK (agar abhi tak nahi hua) ----
+        if confirmation_status == "PENDING":
+            new_status = _check_breakout_confirmation(df, spike_time, candle_color)
+            if new_status is not None:
+                confirmation_status = new_status
+                row["Confirmation_Status"] = new_status
+
+                # Sirf strong-signal spikes (RVOL_20 >= threshold) ko hi
+                # confirmation Telegram alert bhejo
+                if rvol_20 >= CONFIRMATION_ALERT_RVOL_THRESHOLD:
+                    confirmation_sent_count += 1
+                    emoji = {"CONFIRMED_CONTINUATION": "✅", "FAILED_BREAKOUT": "❌",
+                             "STILL_UNDECIDED": "⚪"}.get(new_status, "")
+                    msg = (
+                        f"{emoji} <b>CONFIRMATION UPDATE — {pair}</b>\n\n"
+                        f"Spike Time: {row['Spike_Time_UTC']}\n"
+                        f"Status: <b>{new_status}</b>\n\n"
+                        f"(Indecision candle ke High/Low ke against 2nd candle ka result)"
+                    )
+                    if dry_run:
+                        print(f"  [DRY_RUN] Confirmation Telegram: {msg}")
+                    else:
+                        try:
+                            send_telegram_message(msg)
+                        except Exception as e:
+                            print(f"  [backtest_tracker] Confirmation Telegram error: {e}")
 
         # Poore max_horizon (75 min) tak ki candle chahiye tabhi fully resolve hoga
         max_target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon)
@@ -250,6 +345,8 @@ def resolve_pending(dry_run=False):
             still_pending.append(row)
             continue
 
+        result_row.append(confirmation_status)
+
         # Fully resolved — result likh do
         if dry_run:
             print(f"  [backtest_tracker][DRY_RUN] RESOLVED: {result_row}")
@@ -268,7 +365,9 @@ def resolve_pending(dry_run=False):
         try:
             clean_rows = [[r["Pair"], r["Trigger_Type"], r["Candle_Color"],
                             r["Spike_Time_UTC"], r["Spike_Close"],
-                            r.get("Price_Position", "UNKNOWN")] for r in still_pending]
+                            r.get("Price_Position", "UNKNOWN"),
+                            r.get("RVOL_20", 0),
+                            r.get("Confirmation_Status", "PENDING")] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)
         except Exception as e:
@@ -278,4 +377,5 @@ def resolve_pending(dry_run=False):
               f"{len(still_pending)} still pending.")
 
     print(f"  [backtest_tracker] Resolved: {resolved_count} | "
-          f"Still pending: {len(still_pending)} | Discarded (stale): {discarded_count}")
+          f"Still pending: {len(still_pending)} | Discarded (stale): {discarded_count} | "
+          f"Confirmation alerts sent: {confirmation_sent_count}")

@@ -24,8 +24,15 @@ jobs:
           EOF
       - name: DEBUG - Verify credentials.json structure (safe, no secret exposed)
         run: |
+          echo "=== SYSTEM TIME CHECK ==="
+          date -u
+          echo ""
           python3 - << 'PYEOF'
           import json
+          from datetime import datetime, timezone
+
+          print("Python UTC time:", datetime.now(timezone.utc))
+          print("")
 
           with open('credentials.json') as f:
               content = f.read()
@@ -48,6 +55,22 @@ jobs:
           print("starts with BEGIN marker:", key.startswith('-----BEGIN PRIVATE KEY-----'))
           print("ends with END marker (after strip):", key.rstrip().endswith('-----END PRIVATE KEY-----'))
           print("has any carriage-return chars:", chr(13) in key)
+
+          # Actual JWT-signing test - isse pata chalega signature banane mein
+          # hi koi crypto-level problem hai ya nahi
+          try:
+              from google.oauth2.service_account import Credentials
+              creds = Credentials.from_service_account_file(
+                  'credentials.json',
+                  scopes=["https://www.googleapis.com/auth/spreadsheets"]
+              )
+              print("Credentials object created: SUCCESS")
+              import google.auth.transport.requests
+              request = google.auth.transport.requests.Request()
+              creds.refresh(request)
+              print("TOKEN REFRESH: SUCCESS -- authentication is working!")
+          except Exception as e:
+              print("TOKEN REFRESH FAILED:", repr(e))
           PYEOF
       - name: Create telegram_config.py from secrets
         run: |

@@ -55,12 +55,12 @@ PENDING_WORKSHEET_NAME = "Pending_Spikes"
 RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results"
 
 PENDING_HEADER = ["Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close",
-                   "Price_Position", "RVOL_20", "Confirmation_Status"]
+                   "Price_Position", "RVOL_20", "Confirmation_Status", "Trend_Type", "Trend_Detail"]
 
 RESULTS_HEADER = [
     "Pair", "Spike_Time_UTC", "Candle_Color", "Trigger_Type", "Spike_Close", "Price_Position",
     "Price_After_1", "PctChg_1", "Price_After_3", "PctChg_3",
-    "Price_After_5", "PctChg_5", "Confirmation_Status",
+    "Price_After_5", "PctChg_5", "Confirmation_Status", "Trend_Type", "Trend_Detail",
 ]
 
 CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0   # sirf strong-signal spikes ko hi confirmation-alert bhejo
@@ -135,7 +135,6 @@ def _to_utc_dt(value):
     if dt.tzinfo is None:
         dt = dt.tz_localize("UTC")
     return dt.to_pydatetime()
-
 
 def _to_ist_str(value):
     """UTC string/datetime ko IST string mein convert karta hai (Telegram message ke liye)."""
@@ -229,8 +228,8 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
 # PUBLIC: add_pending — naya spike track karna shuru karo
 # ============================================
 
-def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
-                 price_position="UNKNOWN", rvol_20=0.0):
+def add_pending(pair, trigger_type, candle_color, spike_time, spike_close, price_position="UNKNOWN",
+                 rvol_20=0.0, trend_type="UNKNOWN", trend_detail=""):
     ws = _get_pending_worksheet()
     ws.append_row([
         pair,
@@ -241,6 +240,8 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         price_position,
         round(float(rvol_20), 2),
         "PENDING",   # Confirmation_Status shuru mein hamesha PENDING
+        trend_type,
+        trend_detail,
     ])
 
 
@@ -383,6 +384,8 @@ def resolve_pending(dry_run=False):
             continue
 
         result_row.append(confirmation_status)
+        result_row.append(row.get("Trend_Type", "UNKNOWN"))
+        result_row.append(row.get("Trend_Detail", ""))
 
         # Fully resolved — result likh do
         if dry_run:
@@ -404,7 +407,9 @@ def resolve_pending(dry_run=False):
                             r["Spike_Time_UTC"], r["Spike_Close"],
                             r.get("Price_Position", "UNKNOWN"),
                             r.get("RVOL_20", 0),
-                            r.get("Confirmation_Status", "PENDING")] for r in still_pending]
+                            r.get("Confirmation_Status", "PENDING"),
+                            r.get("Trend_Type", "UNKNOWN"),
+                            r.get("Trend_Detail", "")] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)
         except Exception as e:

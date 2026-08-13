@@ -1,39 +1,57 @@
 name: Intraday Volume Spike Monitor
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   run-scan:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
       - name: Create credentials.json from secret
         run: |
           cat > credentials.json << 'EOF'
           ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           EOF
+      - name: DEBUG - Verify credentials.json structure (safe, no secret exposed)
+        run: |
+          python3 - << 'PYEOF'
+          import json
 
+          with open('credentials.json') as f:
+              content = f.read()
+
+          print("Total file length (chars):", len(content))
+
+          try:
+              d = json.loads(content)
+              print("JSON parse: SUCCESS")
+          except Exception as e:
+              print("JSON parse: FAILED ->", e)
+              exit()
+
+          key = d.get('private_key', '')
+          print("client_email:", d.get('client_email'))
+          print("project_id:", d.get('project_id'))
+          print("private_key_id:", d.get('private_key_id'))
+          print("private_key length:", len(key))
+          print("private_key line count:", key.count(chr(10)))
+          print("starts with BEGIN marker:", key.startswith('-----BEGIN PRIVATE KEY-----'))
+          print("ends with END marker (after strip):", key.rstrip().endswith('-----END PRIVATE KEY-----'))
+          print("has any carriage-return chars:", chr(13) in key)
+          PYEOF
       - name: Create telegram_config.py from secrets
         run: |
           echo "TELEGRAM_BOT_TOKEN = \"${{ secrets.TELEGRAM_BOT_TOKEN }}\"" > telegram_config.py
           echo "TELEGRAM_CHAT_ID = \"${{ secrets.TELEGRAM_CHAT_ID }}\"" >> telegram_config.py
-
       - name: Run intraday_spike_monitor.py
         run: python intraday_spike_monitor.py

@@ -137,6 +137,15 @@ def _to_utc_dt(value):
     return dt.to_pydatetime()
 
 
+def _to_ist_str(value):
+    """UTC string/datetime ko IST string mein convert karta hai (Telegram message ke liye)."""
+    dt = pd.to_datetime(value)
+    if dt.tzinfo is None:
+        dt = dt.tz_localize("UTC")
+    ist_dt = dt + pd.Timedelta(hours=5, minutes=30)
+    return ist_dt.strftime("%Y-%m-%d %H:%M:%S") + " IST"
+
+
 def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES):
     """
     df ke 'Time' column mein target_time ke sabse paas wali candle dhoondta
@@ -320,7 +329,7 @@ def resolve_pending(dry_run=False):
                     msg = (
                         f"{emoji} <b>CONFIRMATION UPDATE — {pair}</b>\n\n"
                         f"<b>Original Spike Info:</b>\n"
-                        f"Spike Time: {row['Spike_Time_UTC']}\n"
+                        f"Spike Time (IST): {_to_ist_str(row['Spike_Time_UTC'])}\n"
                         f"Trigger Type: {row.get('Trigger_Type', 'N/A')}\n"
                         f"Spike Direction: {direction_label}\n"
                         f"Spike Close: {spike_close}\n"

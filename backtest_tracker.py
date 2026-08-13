@@ -298,10 +298,38 @@ def resolve_pending(dry_run=False):
                     confirmation_sent_count += 1
                     emoji = {"CONFIRMED_CONTINUATION": "✅", "FAILED_BREAKOUT": "❌",
                              "STILL_UNDECIDED": "⚪"}.get(new_status, "")
+
+                    status_note = {
+                        "CONFIRMED_CONTINUATION": "Momentum genuinely continue ho raha hai — jis direction mein spike hui thi, price usi taraf aage badh raha hai.",
+                        "FAILED_BREAKOUT": "Ye false breakout tha — price ulti direction mein chala gaya. Trade avoid karna sahi hota.",
+                        "STILL_UNDECIDED": "Abhi clear nahi hai — price kisi bhi taraf decisively nahi gaya. Aur wait karo.",
+                    }.get(new_status, "")
+
+                    # Confirmation-candle (N+2) ka current price bhi nikaal lo,
+                    # taaki abhi tak kitna % move hua wo bhi dikha sakein
+                    target_n2 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 2)
+                    found_n2, row_n2 = _find_closest_row(df, target_n2)
+                    pct_move_so_far = ""
+                    if found_n2:
+                        current_price = float(row_n2["Close"])
+                        pct = round((current_price - spike_close) / spike_close * 100, 2)
+                        pct_move_so_far = f"{pct:+.2f}%"
+
+                    direction_label = "UP (long)" if candle_color == "GREEN" else "DOWN (short)"
+
                     msg = (
                         f"{emoji} <b>CONFIRMATION UPDATE — {pair}</b>\n\n"
+                        f"<b>Original Spike Info:</b>\n"
                         f"Spike Time: {row['Spike_Time_UTC']}\n"
-                        f"Status: <b>{new_status}</b>\n\n"
+                        f"Trigger Type: {row.get('Trigger_Type', 'N/A')}\n"
+                        f"Spike Direction: {direction_label}\n"
+                        f"Spike Close: {spike_close}\n"
+                        f"RVOL_20 (at spike): {rvol_20:.2f}x\n"
+                        f"Price Position (at spike): {row.get('Price_Position', 'N/A')}\n\n"
+                        f"<b>Confirmation Result:</b>\n"
+                        f"Status: <b>{new_status}</b>\n"
+                        f"Move so far (since spike): {pct_move_so_far}\n\n"
+                        f"{status_note}\n\n"
                         f"(Indecision candle ke High/Low ke against 2nd candle ka result)"
                     )
                     if dry_run:

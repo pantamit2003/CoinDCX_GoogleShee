@@ -56,6 +56,22 @@ jobs:
           print("ends with END marker (after strip):", key.rstrip().endswith('-----END PRIVATE KEY-----'))
           print("has any carriage-return chars:", chr(13) in key)
 
+          # LOCAL RSA VALIDATION - Google se contact kiye bina, sirf key
+          # khud valid RSA key hai ya nahi ye check karta hai
+          print("")
+          print("=== LOCAL RSA KEY VALIDATION (no internet needed) ===")
+          try:
+              from cryptography.hazmat.primitives import serialization
+              private_key_obj = serialization.load_pem_private_key(
+                  key.encode(), password=None
+              )
+              print("Local RSA parse: SUCCESS")
+              print("Key size (bits):", private_key_obj.key_size)
+          except Exception as e:
+              print("Local RSA parse: FAILED ->", repr(e))
+
+          print("")
+
           # Actual JWT-signing test - isse pata chalega signature banane mein
           # hi koi crypto-level problem hai ya nahi
           try:

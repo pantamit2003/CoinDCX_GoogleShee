@@ -50,6 +50,7 @@ from data.candles import get_candles
 from exchange.coindcx import get_active_pairs
 from notifications.telegram_bot import send_telegram_message
 from support_resistance import get_support_resistance, classify_price_position
+from trendline import get_trendline_context
 import backtest_tracker
 import config
 
@@ -81,10 +82,11 @@ WORKSHEET_NAME = "Intraday_Spike_Alerts"
 # Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
 TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]
 
-# Sheet header — ab "Price_Position" column bhi add hua hai
+# Sheet header — ab "Trend_Type" aur "Trend_Detail" columns bhi add hue hain
 SHEET_HEADER = [
     "Detected_At_IST", "Candle_Time_UTC", "Pair", "Trigger_Type",
     "Close", "Volume", "RVOL_20", "RVOL_96", "Price_Position",
+    "Trend_Type", "Trend_Detail",
 ]
 
 
@@ -198,7 +200,7 @@ def log_to_sheet(row_values):
 # ============================================
 
 def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
-                          rvol_20, rvol_96, price_position):
+                          rvol_20, rvol_96, price_position, trend_type, trend_detail):
     trigger_note = {
         "BOTH": "Dono short aur medium-term baseline confirm kar rahe hain — sabse strong signal.",
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
@@ -213,6 +215,10 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "MID_RANGE": "Kisi bhi major level ke paas nahi — range ke beech mein.",
     }.get(price_position, "")
 
+    trend_line = f"<b>Trend:</b> {trend_type}"
+    if trend_detail:
+        trend_line += f" ({trend_detail})"
+
     return (
         f"🚨 <b>INTRADAY VOLUME SPIKE — {trigger_type}</b>\n\n"
         f"<b>Pair:</b> {pair}\n"
@@ -221,7 +227,8 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         f"<b>Volume:</b> {volume:,.0f}\n"
         f"<b>RVOL_20:</b> {rvol_20:.2f}x\n"
         f"<b>RVOL_96:</b> {rvol_96:.2f}x\n"
-        f"<b>Price Position:</b> {price_position}\n\n"
+        f"<b>Price Position:</b> {price_position}\n"
+        f"{trend_line}\n\n"
         f"{trigger_note}\n"
         f"{position_note}\n"
         f"Khud verify karke decide karo."
@@ -300,13 +307,27 @@ def run_one_scan():
                     print(f"  [S/R] {pair} pe error: {e}")
                     price_position = "UNKNOWN"
 
+                # ---- TRENDLINE: diagonal-line context nikaalo ----
+                try:
+                    trend_ctx = get_trendline_context(df)
+                    trend_type = trend_ctx["trend"]
+                    trend_detail = (
+                        f"{trend_ctx['touch_points']} touches | "
+                        f"{trend_ctx['position']} ({trend_ctx['deviation_pct']:+.2f}%) | "
+                        f"{'JUST_BROKE_' + trend_ctx['break_direction'] if trend_ctx['just_broke'] else 'no-break'}"
+                    )
+                except Exception as e:
+                    print(f"  [Trendline] {pair} pe error: {e}")
+                    trend_type = "UNKNOWN"
+                    trend_detail = ""
+
                 print(f"  🚨 [{trigger_type}] {pair} | RVOL_20={rvol_20:.2f} RVOL_96={rvol_96:.2f} "
-                      f"| Close={close} | Position={price_position} | Time={candle_time}")
+                      f"| Close={close} | Position={price_position} | Trend={trend_type} | Time={candle_time}")
 
                 candle_time_ist = to_ist(candle_time)
                 message = build_alert_message(
                     pair, trigger_type, candle_time_ist, close, volume,
-                    rvol_20, rvol_96, price_position
+                    rvol_20, rvol_96, price_position, trend_type, trend_detail
                 )
 
                 # ---- TELEGRAM: sirf tabhi bhejo jab RVOL_20 >= 6.0 ----
@@ -334,6 +355,8 @@ def run_one_scan():
                     round(float(rvol_20), 2),
                     round(float(rvol_96), 2),
                     price_position,
+                    trend_type,
+                    trend_detail,
                 ])
 
                 # ---- BACKTEST: is spike ko track karna shuru karo ----
@@ -348,6 +371,8 @@ def run_one_scan():
                         spike_close=close,
                         price_position=price_position,
                         rvol_20=rvol_20,
+                        trend_type=trend_type,
+                        trend_detail=trend_detail,
                     )
                 except Exception as e:
                     print(f"  [backtest_tracker] add_pending mein error: {e}")

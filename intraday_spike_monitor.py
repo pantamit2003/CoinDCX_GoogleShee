@@ -73,7 +73,7 @@ SR_LOOKBACK = 50              # kitne candles se S/R levels nikaalne hain
 SR_CLUSTER_TOLERANCE_PCT = 0.5   # itne % ke andar wale swing points ek level maane jaayenge
 SR_PROXIMITY_PCT = 0.5           # itne % ke andar ho to "NEAR" maana jaayega
 
-MAX_PAIRS_TO_SCAN = 10    # None = saare active pairs, ya testing ke liye number daalo jaise 20
+MAX_PAIRS_TO_SCAN = 250    # None = saare active pairs, ya testing ke liye number daalo jaise 20
 SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
 
 WORKSHEET_NAME = "Intraday_Spike_Alerts"

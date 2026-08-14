@@ -5,6 +5,7 @@ Trend + Candle Shape + Confirmation-Candle-Shape tracking)
 PEHLE (v1) local backtest_pending.json file use karta tha — lekin
 GitHub Actions har run mein NAYI, FRESH virtual machine deta hai, isliye
 wo file kabhi persist nahi hoti thi (har run ke baad gayab ho jaati thi).
+
 FIX: Ab "pending spikes" Google Sheet ke ek tab mein store hoti hain
 ("Pending_Spikes") — jo hamesha persistent hai, GitHub Actions ke
 ephemeral-VM problem se bilkul bach jaate hain.
@@ -35,18 +36,22 @@ IMPORTANT FIX (tolerance matching):
 v3 CHANGE: Trend_Type, Trend_Detail, Candle_Shape (spike-candle ka)
     ab har pending/result row mein store/carry-forward hote hain.
 
-v4 CHANGE: Ab confirmation-candle logic sirf STATUS nahi, balki N+1
-    (indecision candle) aur N+2 (confirmation candle) ka SHAPE bhi
-    return karta hai. Isse pata chalta hai ki jis candle ka High/Low
-    toda gaya, wo khud kitni "strong/weak" thi. Ye info ab Telegram
-    confirmation-message mein bhi dikhti hai.
+v4 CHANGE (NAYA): Ab confirmation-candle logic sirf STATUS nahi,
+    balki N+1 (indecision candle) aur N+2 (confirmation candle) ka
+    SHAPE bhi return karta hai. Isse pata chalta hai ki jis candle
+    ka High/Low toda gaya, wo khud kitni "strong/weak" thi — ek
+    CONFUSION (weak) candle ka toota Low utna meaningful confirmation
+    nahi jitna ek DOMINANCE (strong) candle ka toota Low. Ye info ab
+    Telegram confirmation-message mein bhi dikhti hai.
 """
 from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+
 from data.candles import get_candles
-from notifications.telegram_bot import send_telegram_message
+from notifications.telegram_bot import send_telegram_message, send_strong_telegram_message
 from candle_shape import classify_candle_shape
 import config
 
@@ -76,6 +81,16 @@ RESULTS_HEADER = [
 ]
 
 CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0   # sirf strong-signal spikes ko hi confirmation-alert bhejo
+
+# Strong-bot ke liye — sirf ye Price_Position labels qualify karenge (MID_RANGE excluded).
+# intraday_spike_monitor.py mein bhi yehi list hai (duplicate rakha hai taaki circular
+# import na ho — intraday_spike_monitor.py khud backtest_tracker.py ko import karta hai).
+STRONG_BOT_ALLOWED_POSITIONS = (
+    "BREAKOUT_ABOVE_RESISTANCE",
+    "BREAKDOWN_BELOW_SUPPORT",
+    "NEAR_RESISTANCE",
+    "NEAR_SUPPORT",
+)
 
 
 # ============================================
@@ -110,7 +125,7 @@ def _get_pending_worksheet():
         _pending_ws = spreadsheet.add_worksheet(
             title=PENDING_WORKSHEET_NAME, rows=500, cols=len(PENDING_HEADER) + 2
         )
-        _pending_ws.append_row(PENDING_HEADER)
+        _pending_ws.append_row(PENDING_HEADER, table_range="A1")
     return _pending_ws
 
 
@@ -126,7 +141,7 @@ def _get_results_worksheet():
         _results_ws = spreadsheet.add_worksheet(
             title=RESULTS_WORKSHEET_NAME, rows=5000, cols=len(RESULTS_HEADER) + 2
         )
-        _results_ws.append_row(RESULTS_HEADER)
+        _results_ws.append_row(RESULTS_HEADER, table_range="A1")
     return _results_ws
 
 
@@ -200,8 +215,10 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
     - Dono nahi tuti -> STILL_UNDECIDED
     - Agar N+2 ki candle abhi data mein nahi aayi -> None (abhi wait karo)
 
-    Ab N+1 aur N+2 dono candles ka SHAPE bhi nikalta hai — taaki pata
-    chale jis candle ka High/Low toda gaya, wo khud kitni "strong" thi.
+    NAYA (v4): Ab N+1 aur N+2 dono candles ka SHAPE bhi nikalta hai —
+    taaki pata chale jis candle ka High/Low toda gaya, wo khud kitni
+    "strong" thi. Ek CONFUSION (weak) candle ka toota Low utna
+    meaningful confirmation nahi jitna DOMINANCE (strong) candle ka.
 
     Return: dict ya None (agar abhi determine nahi ho sakta)
         {
@@ -272,7 +289,7 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         candle_shape,
         sr_level_price if sr_level_price is not None else "",
         sr_touch_count,
-    ])
+    ], table_range="A1")
 
 
 # ============================================
@@ -336,7 +353,6 @@ def resolve_pending(dry_run=False):
                 new_status = confirmation_result["status"]
                 n1_shape = confirmation_result["n1_shape"]
                 n2_shape = confirmation_result["n2_shape"]
-
                 confirmation_status = new_status
                 row["Confirmation_Status"] = new_status
                 row["N1_Candle_Shape"] = n1_shape
@@ -397,6 +413,7 @@ def resolve_pending(dry_run=False):
         # Poore max_horizon (75 min) tak ki candle chahiye tabhi fully resolve hoga
         max_target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon)
         found_max, _ = _find_closest_candle(df, max_target_time)
+
         if not found_max:
             # Abhi itna time nahi guzra, agle run mein try karenge
             still_pending.append(row)
@@ -440,7 +457,7 @@ def resolve_pending(dry_run=False):
             print(f"  [backtest_tracker][DRY_RUN] RESOLVED: {result_row}")
         else:
             try:
-                _get_results_worksheet().append_row(result_row)
+                _get_results_worksheet().append_row(result_row, table_range="A1")
             except Exception as e:
                 print(f"  [backtest_tracker] Results likhne mein error: {e}")
                 still_pending.append(row)  # fail hua to pending mein wapas rakho

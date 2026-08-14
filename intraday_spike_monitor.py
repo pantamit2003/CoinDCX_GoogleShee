@@ -154,7 +154,7 @@ def _get_worksheet():
         _worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
         _worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=len(SHEET_HEADER) + 2)
-        _worksheet.append_row(SHEET_HEADER)
+        _worksheet.append_row(SHEET_HEADER, table_range="A1")
     return _worksheet
 
 
@@ -164,7 +164,7 @@ def log_to_sheet(row_values):
         return
     try:
         ws = _get_worksheet()
-        ws.append_row(row_values)
+        ws.append_row(row_values, table_range="A1")
     except Exception as e:
         print(f"  Google Sheet mein likhne mein error: {e}")
 

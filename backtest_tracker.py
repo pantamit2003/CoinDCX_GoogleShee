@@ -1,5 +1,6 @@
 """
-backtest_tracker.py  (v3 — Google Sheet based, GitHub Actions-safe, Trend + Candle Shape)
+backtest_tracker.py  (v4 — Google Sheet based, GitHub Actions-safe,
+Trend + Candle Shape + Confirmation-Candle-Shape tracking)
 =====================================================================
 PEHLE (v1) local backtest_pending.json file use karta tha — lekin
 GitHub Actions har run mein NAYI, FRESH virtual machine deta hai, isliye
@@ -7,6 +8,7 @@ wo file kabhi persist nahi hoti thi (har run ke baad gayab ho jaati thi).
 FIX: Ab "pending spikes" Google Sheet ke ek tab mein store hoti hain
 ("Pending_Spikes") — jo hamesha persistent hai, GitHub Actions ke
 ephemeral-VM problem se bilkul bach jaate hain.
+
 POORA FLOW:
     1. intraday_spike_monitor.py mein jab naya spike detect ho:
        add_pending(...) call hota hai → row "Pending_Spikes" tab mein
@@ -24,14 +26,22 @@ POORA FLOW:
                phir check hoga)
          - Agar spike bahut purani ho gayi (MAX_AGE_HOURS se zyada,
            jaise pair delist ho gaya ho ya data-gap ho) → discard
+
 IMPORTANT FIX (tolerance matching):
     v1 mein candle-time ka EXACT match dhoondte the, jo GitHub Actions
     ke late/early runs mein kabhi match hi nahi karta tha. Ab hum
     "closest candle within tolerance" dhoondte hain — zyada robust hai.
-v3 CHANGE: Ab har pending/result row mein Trend_Type, Trend_Detail, aur
-    Candle_Shape bhi store/carry-forward hote hain — taaki backtest se
-    pata chal sake ki trend-aligned + strong-shape spikes zyada
-    reliable hain ya nahi.
+
+v3 CHANGE: Trend_Type, Trend_Detail, Candle_Shape (spike-candle ka)
+    ab har pending/result row mein store/carry-forward hote hain.
+
+v4 CHANGE (NAYA): Ab confirmation-candle logic sirf STATUS nahi,
+    balki N+1 (indecision candle) aur N+2 (confirmation candle) ka
+    SHAPE bhi return karta hai. Isse pata chalta hai ki jis candle
+    ka High/Low toda gaya, wo khud kitni "strong/weak" thi — ek
+    CONFUSION (weak) candle ka toota Low utna meaningful confirmation
+    nahi jitna ek DOMINANCE (strong) candle ka toota Low. Ye info ab
+    Telegram confirmation-message mein bhi dikhti hai.
 """
 from datetime import datetime, timedelta, timezone
 import pandas as pd
@@ -39,6 +49,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from data.candles import get_candles
 from notifications.telegram_bot import send_telegram_message
+from candle_shape import classify_candle_shape
 import config
 
 HORIZONS = [1, 3, 5]           # candles baad check karna hai (15/45/75 min)
@@ -54,6 +65,7 @@ PENDING_HEADER = [
     "Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close",
     "Price_Position", "RVOL_20", "Confirmation_Status",
     "Trend_Type", "Trend_Detail", "Candle_Shape",
+    "SR_Level_Price", "SR_Touch_Count",
 ]
 
 RESULTS_HEADER = [
@@ -61,6 +73,8 @@ RESULTS_HEADER = [
     "Price_After_1", "PctChg_1", "Price_After_3", "PctChg_3",
     "Price_After_5", "PctChg_5", "Confirmation_Status",
     "Trend_Type", "Trend_Detail", "Candle_Shape",
+    "SR_Level_Price", "SR_Touch_Count",
+    "N1_Candle_Shape", "N2_Candle_Shape",
 ]
 
 CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0   # sirf strong-signal spikes ko hi confirmation-alert bhejo
@@ -169,6 +183,15 @@ def _find_closest_row(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES
     return False, None
 
 
+def _shape_label(open_price, high, low, close):
+    """Candle ka OHLC leke ek readable shape-label string banata hai."""
+    try:
+        ctx = classify_candle_shape(float(open_price), float(high), float(low), float(close))
+        return f"{ctx['shape']} ({ctx['strength']}, body={ctx['body_pct']}%)"
+    except Exception:
+        return "UNKNOWN"
+
+
 def _check_breakout_confirmation(df, spike_time, candle_color):
     """
     'confirmation candle' logic:
@@ -178,7 +201,18 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
     - Agar N+2 ki Low, N+1 ki Low se neeche gayi -> FAILED_BREAKOUT
     - Dono nahi tuti -> STILL_UNDECIDED
     - Agar N+2 ki candle abhi data mein nahi aayi -> None (abhi wait karo)
-    Return: confirmation_status string, ya None agar abhi determine nahi ho sakta
+
+    NAYA (v4): Ab N+1 aur N+2 dono candles ka SHAPE bhi nikalta hai —
+    taaki pata chale jis candle ka High/Low toda gaya, wo khud kitni
+    "strong" thi. Ek CONFUSION (weak) candle ka toota Low utna
+    meaningful confirmation nahi jitna DOMINANCE (strong) candle ka.
+
+    Return: dict ya None (agar abhi determine nahi ho sakta)
+        {
+            "status": "CONFIRMED_CONTINUATION"/"FAILED_BREAKOUT"/"STILL_UNDECIDED",
+            "n1_shape": readable shape string (indecision candle ka),
+            "n2_shape": readable shape string (confirmation candle ka),
+        }
     """
     target_n1 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 1)
     target_n2 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 2)
@@ -197,18 +231,27 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
 
     if candle_color == "GREEN":
         if broke_high:
-            return "CONFIRMED_CONTINUATION"
+            status = "CONFIRMED_CONTINUATION"
         elif broke_low:
-            return "FAILED_BREAKOUT"
+            status = "FAILED_BREAKOUT"
         else:
-            return "STILL_UNDECIDED"
+            status = "STILL_UNDECIDED"
     else:
         if broke_low:
-            return "CONFIRMED_CONTINUATION"
+            status = "CONFIRMED_CONTINUATION"
         elif broke_high:
-            return "FAILED_BREAKOUT"
+            status = "FAILED_BREAKOUT"
         else:
-            return "STILL_UNDECIDED"
+            status = "STILL_UNDECIDED"
+
+    n1_shape = _shape_label(row_n1["Open"], high_n1, low_n1, row_n1["Close"])
+    n2_shape = _shape_label(row_n2["Open"], high_n2, low_n2, row_n2["Close"])
+
+    return {
+        "status": status,
+        "n1_shape": n1_shape,
+        "n2_shape": n2_shape,
+    }
 
 
 # ============================================
@@ -216,7 +259,8 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
 # ============================================
 def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
                  price_position="UNKNOWN", rvol_20=0.0,
-                 trend_type="UNKNOWN", trend_detail="", candle_shape="UNKNOWN"):
+                 trend_type="UNKNOWN", trend_detail="", candle_shape="UNKNOWN",
+                 sr_level_price=None, sr_touch_count=0):
     ws = _get_pending_worksheet()
     ws.append_row([
         pair,
@@ -230,6 +274,8 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         trend_type,
         trend_detail,
         candle_shape,
+        sr_level_price if sr_level_price is not None else "",
+        sr_touch_count,
     ])
 
 
@@ -270,6 +316,11 @@ def resolve_pending(dry_run=False):
         rvol_20 = float(row.get("RVOL_20", 0) or 0)
         confirmation_status = row.get("Confirmation_Status", "PENDING")
 
+        # N1/N2 shape carry-forward ke liye — agar is run mein resolve na ho
+        # payein to bhi purani value (agar pehle se set hai) bachi rahe
+        n1_shape = row.get("N1_Candle_Shape", "")
+        n2_shape = row.get("N2_Candle_Shape", "")
+
         # Bahut purana ho gaya (pair delist ho gaya ho sakta hai, data-gap) -> discard
         if now_utc - spike_time > timedelta(hours=MAX_AGE_HOURS):
             print(f"  [backtest_tracker] {pair} @ {row['Spike_Time_UTC']} stale ho gaya "
@@ -284,10 +335,16 @@ def resolve_pending(dry_run=False):
 
         # ---- CONFIRMATION-CANDLE CHECK (agar abhi tak nahi hua) ----
         if confirmation_status == "PENDING":
-            new_status = _check_breakout_confirmation(df, spike_time, candle_color)
-            if new_status is not None:
+            confirmation_result = _check_breakout_confirmation(df, spike_time, candle_color)
+            if confirmation_result is not None:
+                new_status = confirmation_result["status"]
+                n1_shape = confirmation_result["n1_shape"]
+                n2_shape = confirmation_result["n2_shape"]
+
                 confirmation_status = new_status
                 row["Confirmation_Status"] = new_status
+                row["N1_Candle_Shape"] = n1_shape
+                row["N2_Candle_Shape"] = n2_shape
 
                 # Sirf strong-signal spikes (RVOL_20 >= threshold) ko hi
                 # confirmation Telegram alert bhejo
@@ -326,6 +383,8 @@ def resolve_pending(dry_run=False):
                         f"Candle Shape (at spike): {row.get('Candle_Shape', 'N/A')}\n\n"
                         f"<b>Confirmation Result:</b>\n"
                         f"Status: <b>{new_status}</b>\n"
+                        f"Indecision Candle (N+1) Shape: {n1_shape}\n"
+                        f"Confirmation Candle (N+2) Shape: {n2_shape}\n"
                         f"Move so far (since spike): {pct_move_so_far}\n\n"
                         f"{status_note}\n\n"
                         f"(Indecision candle ke High/Low ke against 2nd candle ka result)"
@@ -375,6 +434,10 @@ def resolve_pending(dry_run=False):
         result_row.append(row.get("Trend_Type", "UNKNOWN"))
         result_row.append(row.get("Trend_Detail", ""))
         result_row.append(row.get("Candle_Shape", "UNKNOWN"))
+        result_row.append(row.get("SR_Level_Price", ""))
+        result_row.append(row.get("SR_Touch_Count", 0))
+        result_row.append(n1_shape)
+        result_row.append(n2_shape)
 
         # Fully resolved — result likh do
         if dry_run:
@@ -401,6 +464,8 @@ def resolve_pending(dry_run=False):
                 r.get("Trend_Type", "UNKNOWN"),
                 r.get("Trend_Detail", ""),
                 r.get("Candle_Shape", "UNKNOWN"),
+                r.get("SR_Level_Price", ""),
+                r.get("SR_Touch_Count", 0),
             ] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)

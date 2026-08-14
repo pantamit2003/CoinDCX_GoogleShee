@@ -68,7 +68,7 @@ PENDING_HEADER = [
     "Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close",
     "Price_Position", "RVOL_20", "Confirmation_Status",
     "Trend_Type", "Trend_Detail", "Candle_Shape",
-    "SR_Level_Price", "SR_Touch_Count",
+    "SR_Level_Price", "SR_Touch_Count", "N1_Alert_Sent",
 ]
 
 RESULTS_HEADER = [
@@ -267,6 +267,53 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
     }
 
 
+def _send_n1_update(row, df, spike_time, spike_close, candle_color, dry_run=False):
+    """
+    Spike ke turant baad wali (N+1) candle bante hi ek chhota, turant
+    update bhejta hai — sirf STRONG bot pe. Yeh poore confirmation
+    (N+2) ka wait nahi karta, isliye jaldi milta hai.
+    Return: True agar bheja gaya (ya bhejne ki koshish hui), False agar
+    N+1 candle abhi tak data mein nahi aayi (matlab abhi wait karo).
+    """
+    target_n1 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 1)
+    found_n1, row_n1 = _find_closest_row(df, target_n1)
+    if not found_n1:
+        return False  # abhi itna time nahi guzra
+
+    n1_close = float(row_n1["Close"])
+    pct_move = round((n1_close - spike_close) / spike_close * 100, 2)
+    n1_shape_label = _shape_label(
+        row_n1["Open"], float(row_n1["High"]), float(row_n1["Low"]), row_n1["Close"]
+    )
+    direction_label = "UP (long)" if candle_color == "GREEN" else "DOWN (short)"
+
+    msg = (
+        f"⏱️ <b>N+1 UPDATE — {row['Pair']}</b>\n\n"
+        f"<b>Original Spike:</b>\n"
+        f"Spike Time (IST): {_to_ist_str(row['Spike_Time_UTC'])}\n"
+        f"Spike Direction: {direction_label}\n"
+        f"Spike Close: {spike_close}\n"
+        f"Candle Shape (at spike): {row.get('Candle_Shape', 'N/A')}\n"
+        f"Price Position (at spike): {row.get('Price_Position', 'N/A')}\n\n"
+        f"<b>N+1 Candle (15 min baad):</b>\n"
+        f"Time (IST): {_to_ist_str(str(row_n1['Time']))}\n"
+        f"Close: {n1_close}\n"
+        f"Shape: {n1_shape_label}\n"
+        f"Move so far (since spike): {pct_move:+.2f}%\n\n"
+        f"(Poora confirmation N+2 candle ke baad milega — yeh sirf ek turant update hai)"
+    )
+
+    if dry_run:
+        print(f"  [DRY_RUN] N+1 Update Telegram (strong bot): {msg}")
+        return True
+
+    try:
+        send_strong_telegram_message(msg)
+    except Exception as e:
+        print(f"  [backtest_tracker] N+1 update Telegram error: {e}")
+    return True
+
+
 # ============================================
 # PUBLIC: add_pending — naya spike track karna shuru karo
 # ============================================
@@ -289,6 +336,7 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         candle_shape,
         sr_level_price if sr_level_price is not None else "",
         sr_touch_count,
+        "NO",   # N1_Alert_Sent — shuru mein hamesha NO, N+1 candle aate hi update hoga
     ], table_range="A1")
 
 
@@ -345,6 +393,30 @@ def resolve_pending(dry_run=False):
         if df is None or df.empty:
             still_pending.append(row)
             continue
+
+        # ---- N+1 UPDATE (strong-bot only) — spike DOMINANCE thi AUR kisi
+        # S/R level pe relevant thi, to N+1 candle bante hi (poore
+        # confirmation ka wait kiye bina) ek turant update bhejo strong
+        # bot pe — taaki jaldi pata chale spike ke turant baad kya hua. ----
+        n1_alert_sent = str(row.get("N1_Alert_Sent", "NO")).upper()
+        if n1_alert_sent != "YES":
+            original_shape = str(row.get("Candle_Shape", ""))
+            original_position = row.get("Price_Position", "UNKNOWN")
+            qualifies_for_n1_alert = (
+                original_shape.startswith("DOMINANCE")
+                and original_position in STRONG_BOT_ALLOWED_POSITIONS
+            )
+            if qualifies_for_n1_alert:
+                sent = _send_n1_update(
+                    row, df, spike_time, spike_close, candle_color, dry_run=dry_run
+                )
+                if sent:
+                    row["N1_Alert_Sent"] = "YES"
+            else:
+                # Criteria hi match nahi karti — dobara har run mein check
+                # na karna pade, isliye seedha "YES" (matlab "N/A, skip")
+                # maar do taaki flag ban jaaye.
+                row["N1_Alert_Sent"] = "YES"
 
         # ---- CONFIRMATION-CANDLE CHECK (agar abhi tak nahi hua) ----
         if confirmation_status == "PENDING":
@@ -406,9 +478,24 @@ def resolve_pending(dry_run=False):
                         print(f"  [DRY_RUN] Confirmation Telegram: {msg}")
                     else:
                         try:
-                            send_telegram_message(msg)
+                            send_telegram_message(msg)   # purana bot — sab confirmation updates yahan
                         except Exception as e:
                             print(f"  [backtest_tracker] Confirmation Telegram error: {e}")
+
+                        # NAYA — agar original spike DOMINANCE shape thi AUR
+                        # kisi S/R level ke relevant thi (jaisa intraday_spike_monitor.py
+                        # mein strong-bot criteria hai), to confirmation update bhi
+                        # strong bot pe bhejo — taaki strong-bot channel pe bhi
+                        # poora lifecycle (spike + confirmation) dikhe, sirf spike nahi.
+                        original_shape = str(row.get("Candle_Shape", ""))
+                        original_position = row.get("Price_Position", "UNKNOWN")
+                        is_strong_shape = original_shape.startswith("DOMINANCE")
+                        is_level_relevant = original_position in STRONG_BOT_ALLOWED_POSITIONS
+                        if is_strong_shape and is_level_relevant:
+                            try:
+                                send_strong_telegram_message(msg)
+                            except Exception as e:
+                                print(f"  [backtest_tracker] Strong-bot confirmation Telegram error: {e}")
 
         # Poore max_horizon (75 min) tak ki candle chahiye tabhi fully resolve hoga
         max_target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon)
@@ -479,6 +566,7 @@ def resolve_pending(dry_run=False):
                 r.get("Candle_Shape", "UNKNOWN"),
                 r.get("SR_Level_Price", ""),
                 r.get("SR_Touch_Count", 0),
+                r.get("N1_Alert_Sent", "NO"),
             ] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)

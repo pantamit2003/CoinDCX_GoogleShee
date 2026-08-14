@@ -9,7 +9,8 @@ KYA KARTA HAI:
 - Saare active futures pairs ke 15-min candles CoinDCX se laata hai
 - Sirf abhi-abhi CLOSE hui candle ka RVOL check karta hai (RVOL_20 aur RVOL_96)
 - Support/Resistance ke against price ki position classify karta hai
-  (support_resistance.py module se)
+  (support_resistance.py module se) — AB touch-count bhi milta hai,
+  taaki pata chale wo S/R level kitni baar proven/tested hai
 - Trendline (diagonal support/resistance) ke against bhi context nikalta
   hai (trendline.py module se) — trend direction, touch points, break/retest
 - Khud spike-candle ka shape bhi classify karta hai
@@ -69,10 +70,11 @@ WORKSHEET_NAME = "Intraday_Spike_Alerts"
 # Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
 TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]
 
-# Sheet header — Trend_Type, Trend_Detail, aur Candle_Shape columns bhi add hue hain
+# Sheet header — SR_Level_Price, SR_Touch_Count columns bhi add hue hain
 SHEET_HEADER = [
     "Detected_At_IST", "Candle_Time_UTC", "Pair", "Trigger_Type",
-    "Close", "Volume", "RVOL_20", "RVOL_96", "Price_Position",
+    "Close", "Volume", "RVOL_20", "RVOL_96",
+    "Price_Position", "SR_Level_Price", "SR_Touch_Count",
     "Trend_Type", "Trend_Detail", "Candle_Shape",
 ]
 
@@ -171,8 +173,8 @@ def log_to_sheet(row_values):
 # ALERT MESSAGE
 # ============================================
 def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
-                         rvol_20, rvol_96, price_position, trend_type, trend_detail,
-                         candle_shape_label):
+                         rvol_20, rvol_96, price_position_label, sr_level_price, sr_touch_count,
+                         trend_type, trend_detail, candle_shape_label):
     trigger_note = {
         "BOTH": "Dono short aur medium-term baseline confirm kar rahe hain — sabse strong signal.",
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
@@ -185,7 +187,12 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "NEAR_RESISTANCE": "⚠️ Resistance ke paas hai — reversal ka risk zyada.",
         "NEAR_SUPPORT": "⚠️ Support ke paas hai — bounce ya breakdown, dono possible.",
         "MID_RANGE": "Kisi bhi major level ke paas nahi — range ke beech mein.",
-    }.get(price_position, "")
+    }.get(price_position_label, "")
+
+    # S/R line — sirf tabhi extra info dikhao jab koi relevant level mila ho (MID_RANGE mein nahi hoga)
+    sr_line = f"<b>Price Position:</b> {price_position_label}"
+    if sr_level_price is not None:
+        sr_line += f" (Level: {sr_level_price}, tested {sr_touch_count}x pehle)"
 
     trend_line = f"<b>Trend:</b> {trend_type}"
     if trend_detail:
@@ -199,7 +206,7 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         f"<b>Volume:</b> {volume:,.0f}\n"
         f"<b>RVOL_20:</b> {rvol_20:.2f}x\n"
         f"<b>RVOL_96:</b> {rvol_96:.2f}x\n"
-        f"<b>Price Position:</b> {price_position}\n"
+        f"{sr_line}\n"
         f"{trend_line}\n"
         f"<b>Candle Shape:</b> {candle_shape_label}\n\n"
         f"{trigger_note}\n"
@@ -268,19 +275,24 @@ def run_one_scan():
                 # candle_color yahin ek baar nikal lo — poore block mein isi ko use karenge
                 candle_color = "GREEN" if close >= candle_open else "RED"
 
-                # ---- SUPPORT/RESISTANCE: price ki position nikaalo ----
+                # ---- SUPPORT/RESISTANCE: price ki position + touch-count nikaalo ----
                 try:
                     resistance_levels, support_levels = get_support_resistance(
                         df, lookback=SR_LOOKBACK,
                         cluster_tolerance_pct=SR_CLUSTER_TOLERANCE_PCT
                     )
-                    price_position = classify_price_position(
+                    sr_result = classify_price_position(
                         close, prev_close, resistance_levels, support_levels,
                         proximity_pct=SR_PROXIMITY_PCT
                     )
+                    price_position = sr_result["label"]
+                    sr_level_price = sr_result["level_price"]
+                    sr_touch_count = sr_result["touch_count"]
                 except Exception as e:
                     print(f"  [S/R] {pair} pe error: {e}")
                     price_position = "UNKNOWN"
+                    sr_level_price = None
+                    sr_touch_count = 0
 
                 # ---- TRENDLINE: diagonal-line context nikaalo ----
                 try:
@@ -305,13 +317,14 @@ def run_one_scan():
                     candle_shape_label = "UNKNOWN"
 
                 print(f"  🚨 [{trigger_type}] {pair} | RVOL_20={rvol_20:.2f} RVOL_96={rvol_96:.2f} "
-                      f"| Close={close} | Position={price_position} | Trend={trend_type} | "
-                      f"Shape={candle_shape_label} | Time={candle_time}")
+                      f"| Close={close} | Position={price_position} (touched {sr_touch_count}x) | "
+                      f"Trend={trend_type} | Shape={candle_shape_label} | Time={candle_time}")
 
                 candle_time_ist = to_ist(candle_time)
                 message = build_alert_message(
                     pair, trigger_type, candle_time_ist, close, volume,
-                    rvol_20, rvol_96, price_position, trend_type, trend_detail, candle_shape_label
+                    rvol_20, rvol_96, price_position, sr_level_price, sr_touch_count,
+                    trend_type, trend_detail, candle_shape_label
                 )
 
                 # ---- TELEGRAM: sirf tabhi bhejo jab RVOL_20 >= threshold ----
@@ -339,6 +352,8 @@ def run_one_scan():
                     round(float(rvol_20), 2),
                     round(float(rvol_96), 2),
                     price_position,
+                    sr_level_price if sr_level_price is not None else "",
+                    sr_touch_count,
                     trend_type,
                     trend_detail,
                     candle_shape_label,
@@ -357,6 +372,8 @@ def run_one_scan():
                         trend_type=trend_type,
                         trend_detail=trend_detail,
                         candle_shape=candle_shape_label,
+                        sr_level_price=sr_level_price,
+                        sr_touch_count=sr_touch_count,
                     )
                 except Exception as e:
                     print(f"  [backtest_tracker] add_pending mein error: {e}")
@@ -381,5 +398,5 @@ if __name__ == "__main__":
     print(f"DRY_RUN = {DRY_RUN}")
     print(f"RVOL_SHORT_THRESHOLD={RVOL_SHORT_THRESHOLD} | RVOL_LONG_THRESHOLD={RVOL_LONG_THRESHOLD}")
     print(f"Telegram sirf RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} pe jayega")
-    print(f"Support/Resistance tracking: ON | Trendline tracking: ON | Candle Shape: ON\n")
+    print(f"Support/Resistance tracking: ON (with touch-count) | Trendline tracking: ON | Candle Shape: ON\n")
     run_one_scan()

@@ -25,6 +25,13 @@ Har category ka Sheet mein record hota hai (Trigger_Type column ke saath) —
 lekin TELEGRAM sirf tabhi jaata hai jab RVOL_20 >= RVOL_20_ALERT_THRESHOLD
 ho.
 
+NAYA — DUAL TELEGRAM BOT:
+    Purana bot (send_telegram_message) — SAARE qualifying signals yahan
+    jaate hain, jaisa pehle hota tha.
+    Naya bot (send_strong_telegram_message) — SIRF DOMINANCE shape wale
+    high-conviction signals yahan bhi jaate hain, taaki phone pe ek
+    clean, kam-clutter wala channel bhi mile.
+
 CHALANE KA TARIKA (local testing ke liye bhi):
     python intraday_spike_monitor.py
 """
@@ -37,7 +44,7 @@ from google.oauth2.service_account import Credentials
 
 from data.candles import get_candles
 from exchange.coindcx import get_active_pairs
-from notifications.telegram_bot import send_telegram_message
+from notifications.telegram_bot import send_telegram_message, send_strong_telegram_message
 from support_resistance import get_support_resistance, classify_price_position
 from trendline import get_trendline_context
 from candle_shape import classify_candle_shape
@@ -244,6 +251,7 @@ def run_one_scan():
 
     counts = {"SHORT_ONLY": 0, "LONG_ONLY": 0, "BOTH": 0}
     telegram_sent_count = 0
+    strong_telegram_sent_count = 0
 
     for pair in pairs:
         try:
@@ -309,11 +317,14 @@ def run_one_scan():
                     trend_detail = ""
 
                 # ---- CANDLE SHAPE: spike-candle khud Dominance/Rejection/Confusion hai? ----
+                # shape_ctx ko try ke bahar bhi default value milta hai (crash-safety),
+                # taaki neeche "if shape_ctx['shape'] == 'DOMINANCE'" check kabhi crash na ho
                 try:
                     shape_ctx = classify_candle_shape(candle_open, candle_high, candle_low, close)
                     candle_shape_label = f"{shape_ctx['shape']} ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)"
                 except Exception as e:
                     print(f"  [CandleShape] {pair} pe error: {e}")
+                    shape_ctx = {"shape": "UNKNOWN"}
                     candle_shape_label = "UNKNOWN"
 
                 print(f"  🚨 [{trigger_type}] {pair} | RVOL_20={rvol_20:.2f} RVOL_96={rvol_96:.2f} "
@@ -333,7 +344,13 @@ def run_one_scan():
                     if DRY_RUN:
                         print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
                     else:
-                        send_telegram_message(message)
+                        send_telegram_message(message)   # purana bot — sab signals yahan
+
+                        # NAYA — sirf DOMINANCE (strong) shape wale high-conviction
+                        # signals alag, clutter-free bot/chat pe bhi jaate hain
+                        if shape_ctx["shape"] == "DOMINANCE":
+                            strong_telegram_sent_count += 1
+                            send_strong_telegram_message(message)
                 else:
                     print(f"  (RVOL_20={rvol_20:.2f} < {RVOL_20_ALERT_THRESHOLD}, "
                           f"Telegram skip — sirf Sheet mein log hua)")
@@ -387,7 +404,8 @@ def run_one_scan():
     total_alerts = sum(counts.values())
     print(f"\nScan complete. {total_alerts} spike(s) mile — "
           f"BOTH: {counts['BOTH']}, SHORT_ONLY: {counts['SHORT_ONLY']}, LONG_ONLY: {counts['LONG_ONLY']}")
-    print(f"Telegram bheja gaya: {telegram_sent_count} (RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} wale)")
+    print(f"Telegram (main) bheja gaya: {telegram_sent_count} (RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} wale)")
+    print(f"Telegram (strong/DOMINANCE) bheja gaya: {strong_telegram_sent_count}")
 
 
 # ============================================
@@ -398,5 +416,6 @@ if __name__ == "__main__":
     print(f"DRY_RUN = {DRY_RUN}")
     print(f"RVOL_SHORT_THRESHOLD={RVOL_SHORT_THRESHOLD} | RVOL_LONG_THRESHOLD={RVOL_LONG_THRESHOLD}")
     print(f"Telegram sirf RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} pe jayega")
-    print(f"Support/Resistance tracking: ON (with touch-count) | Trendline tracking: ON | Candle Shape: ON\n")
+    print(f"Support/Resistance tracking: ON (with touch-count) | Trendline tracking: ON | Candle Shape: ON")
+    print(f"Dual Telegram: main bot (sab signals) + strong bot (sirf DOMINANCE)\n")
     run_one_scan()

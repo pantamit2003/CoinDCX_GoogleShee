@@ -51,6 +51,7 @@ from exchange.coindcx import get_active_pairs
 from notifications.telegram_bot import send_telegram_message
 from support_resistance import get_support_resistance, classify_price_position
 from trendline import get_trendline_context
+from candle_shape import classify_candle_shape
 import backtest_tracker
 import config
 
@@ -82,11 +83,11 @@ WORKSHEET_NAME = "Intraday_Spike_Alerts"
 # Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
 TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]
 
-# Sheet header — ab "Trend_Type" aur "Trend_Detail" columns bhi add hue hain
+# Sheet header — ab "Trend_Type", "Trend_Detail" aur "Candle_Shape" columns bhi add hue hain
 SHEET_HEADER = [
     "Detected_At_IST", "Candle_Time_UTC", "Pair", "Trigger_Type",
     "Close", "Volume", "RVOL_20", "RVOL_96", "Price_Position",
-    "Trend_Type", "Trend_Detail",
+    "Trend_Type", "Trend_Detail", "Candle_Shape",
 ]
 
 
@@ -200,7 +201,7 @@ def log_to_sheet(row_values):
 # ============================================
 
 def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
-                          rvol_20, rvol_96, price_position, trend_type, trend_detail):
+                          rvol_20, rvol_96, price_position, trend_type, trend_detail, candle_shape_label):
     trigger_note = {
         "BOTH": "Dono short aur medium-term baseline confirm kar rahe hain — sabse strong signal.",
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
@@ -228,7 +229,8 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         f"<b>RVOL_20:</b> {rvol_20:.2f}x\n"
         f"<b>RVOL_96:</b> {rvol_96:.2f}x\n"
         f"<b>Price Position:</b> {price_position}\n"
-        f"{trend_line}\n\n"
+        f"{trend_line}\n"
+        f"<b>Candle Shape:</b> {candle_shape_label}\n\n"
         f"{trigger_note}\n"
         f"{position_note}\n"
         f"Khud verify karke decide karo."
@@ -321,13 +323,25 @@ def run_one_scan():
                     trend_type = "UNKNOWN"
                     trend_detail = ""
 
+                # ---- CANDLE SHAPE: spike-candle khud Dominance/Rejection/Confusion hai? ----
+                try:
+                    candle_open = last_row["Open"]
+                    candle_high = last_row["High"]
+                    candle_low = last_row["Low"]
+                    shape_ctx = classify_candle_shape(candle_open, candle_high, candle_low, close)
+                    candle_shape_label = f"{shape_ctx['shape']} ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)"
+                except Exception as e:
+                    print(f"  [CandleShape] {pair} pe error: {e}")
+                    candle_shape_label = "UNKNOWN"
+
                 print(f"  🚨 [{trigger_type}] {pair} | RVOL_20={rvol_20:.2f} RVOL_96={rvol_96:.2f} "
-                      f"| Close={close} | Position={price_position} | Trend={trend_type} | Time={candle_time}")
+                      f"| Close={close} | Position={price_position} | Trend={trend_type} | "
+                      f"Shape={candle_shape_label} | Time={candle_time}")
 
                 candle_time_ist = to_ist(candle_time)
                 message = build_alert_message(
                     pair, trigger_type, candle_time_ist, close, volume,
-                    rvol_20, rvol_96, price_position, trend_type, trend_detail
+                    rvol_20, rvol_96, price_position, trend_type, trend_detail, candle_shape_label
                 )
 
                 # ---- TELEGRAM: sirf tabhi bhejo jab RVOL_20 >= 6.0 ----
@@ -357,11 +371,11 @@ def run_one_scan():
                     price_position,
                     trend_type,
                     trend_detail,
+                    candle_shape_label,
                 ])
 
                 # ---- BACKTEST: is spike ko track karna shuru karo ----
                 try:
-                    candle_open = last_row["Open"]
                     candle_color = "GREEN" if close >= candle_open else "RED"
                     backtest_tracker.add_pending(
                         pair=pair,
@@ -373,6 +387,7 @@ def run_one_scan():
                         rvol_20=rvol_20,
                         trend_type=trend_type,
                         trend_detail=trend_detail,
+                        candle_shape=candle_shape_label,
                     )
                 except Exception as e:
                     print(f"  [backtest_tracker] add_pending mein error: {e}")

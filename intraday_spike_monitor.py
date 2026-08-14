@@ -5,40 +5,28 @@ NAYA STANDALONE SCRIPT — existing check_watchlist.py / daily_breakout_scan.py 
 volume_watch.py ko bilkul touch nahi karta.
 
 KYA KARTA HAI:
-- Har 15 minute pe (GitHub Actions cron ke through) chalta hai
+- Har 15 minute pe (cron-job.org ke external trigger ke through) chalta hai
 - Saare active futures pairs ke 15-min candles CoinDCX se laata hai
 - Sirf abhi-abhi CLOSE hui candle ka RVOL check karta hai (RVOL_20 aur RVOL_96)
-- Ab Support/Resistance ke against bhi price ki position classify karta hai
-  (support_resistance.py module se) — taaki pata chale spike breakout wali
-  hai ya kisi level ke paas ruki hui
+- Support/Resistance ke against price ki position classify karta hai
+  (support_resistance.py module se)
+- Trendline (diagonal support/resistance) ke against bhi context nikalta
+  hai (trendline.py module se) — trend direction, touch points, break/retest
+- Khud spike-candle ka shape bhi classify karta hai
+  (candle_shape.py module se) — DOMINANCE / REJECTION / CONFUSION
 
 BACKTESTING KE LIYE — 3 INDEPENDENT CONDITIONS:
-Ab hum ek hi combined (AND) condition pe bharosa nahi karte. Teeno alag-alag
-check hote hain, taaki baad mein backtest karke pata chale kaunsa rule
-sabse zyada reliable/profitable hai:
     1. SHORT_ONLY — sirf RVOL_20 >= threshold pass hua, RVOL_96 nahi
     2. LONG_ONLY  — sirf RVOL_96 >= threshold pass hua, RVOL_20 nahi
     3. BOTH       — dono RVOL_20 aur RVOL_96 pass hue (sabse strict)
 
 Har category ka Sheet mein record hota hai (Trigger_Type column ke saath) —
 lekin TELEGRAM sirf tabhi jaata hai jab RVOL_20 >= RVOL_20_ALERT_THRESHOLD
-ho (taaki phone pe sirf strong signals ke notifications aayein, weak wale
-sirf Sheet mein log ho jaayein backtesting ke liye).
-
-NAYA — PRICE_POSITION column:
-Har spike ke saath ab ye bhi record hota hai ki price kis S/R zone mein
-hai: NEAR_RESISTANCE, BREAKOUT_ABOVE_RESISTANCE, NEAR_SUPPORT,
-BREAKDOWN_BELOW_SUPPORT, ya MID_RANGE. Isse baad mein backtest se pata
-chalega ki breakout-wali spikes zyada reliable hain ya nahi.
-
-GITHUB ACTIONS VERSION:
-Ye script ek baar scan karke exit ho jaati hai. GitHub Actions ka cron
-schedule khud har 15 minute pe naya run trigger karega.
+ho.
 
 CHALANE KA TARIKA (local testing ke liye bhi):
     python intraday_spike_monitor.py
 """
-
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -55,11 +43,9 @@ from candle_shape import classify_candle_shape
 import backtest_tracker
 import config
 
-
 # ============================================
 # CONFIG — pehle inhe apni marzi se set karo
 # ============================================
-
 DRY_RUN = False         # True = sirf console print, Telegram/Sheet pe kuch nahi jayega
 RESOLUTION = "15"       # 15-min candles
 LOOKBACK_SHORT = 20     # ~5 hours ka baseline
@@ -67,13 +53,13 @@ LOOKBACK_LONG = 96      # ~1 din ka baseline
 
 RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye (Sheet-logging ke liye)
 RVOL_LONG_THRESHOLD = 6.0    # RVOL_96 kam se kam itna hona chahiye (Sheet-logging ke liye)
-
 RVOL_20_ALERT_THRESHOLD = 6.0   # Telegram alert SIRF tabhi jayega jab RVOL_20 isse zyada ho
-                                  # (RVOL_96 kuch bhi ho, koi restriction nahi)
 
 SR_LOOKBACK = 50              # kitne candles se S/R levels nikaalne hain
 SR_CLUSTER_TOLERANCE_PCT = 0.5   # itne % ke andar wale swing points ek level maane jaayenge
 SR_PROXIMITY_PCT = 0.5           # itne % ke andar ho to "NEAR" maana jaayega
+
+TRENDLINE_LOOKBACK = 60       # kitni candles peeche jaake trendline fit karni hai
 
 MAX_PAIRS_TO_SCAN = 250    # None = saare active pairs, ya testing ke liye number daalo jaise 20
 SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
@@ -83,7 +69,7 @@ WORKSHEET_NAME = "Intraday_Spike_Alerts"
 # Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
 TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]
 
-# Sheet header — ab "Trend_Type", "Trend_Detail" aur "Candle_Shape" columns bhi add hue hain
+# Sheet header — Trend_Type, Trend_Detail, aur Candle_Shape columns bhi add hue hain
 SHEET_HEADER = [
     "Detected_At_IST", "Candle_Time_UTC", "Pair", "Trigger_Type",
     "Close", "Volume", "RVOL_20", "RVOL_96", "Price_Position",
@@ -94,7 +80,6 @@ SHEET_HEADER = [
 # ============================================
 # TIME HELPERS
 # ============================================
-
 def to_ist(utc_dt):
     """UTC candle time ko IST (Indian Standard Time) string mein convert karta hai."""
     dt = pd.to_datetime(utc_dt)
@@ -107,7 +92,6 @@ def to_ist(utc_dt):
 # ============================================
 # RVOL CALCULATION
 # ============================================
-
 def get_intraday_rvol(df, lookback_periods):
     """
     Har candle ka RVOL nikalta hai, uske pichle N candles ke average se
@@ -115,34 +99,27 @@ def get_intraday_rvol(df, lookback_periods):
     average mein shaamil na ho.
     """
     df = df.copy()
-
     for period in lookback_periods:
         avg_col = f"avg_vol_{period}"
         df[avg_col] = df["Volume"].rolling(window=period).mean().shift(1)
-
         rvol_col = f"RVOL_{period}"
         df[rvol_col] = df["Volume"] / df[avg_col]
-
         df.drop(columns=[avg_col], inplace=True)
-
     return df
 
 
 # ============================================
 # 3 INDEPENDENT CONDITIONS — backtesting ke liye alag-alag
 # ============================================
-
 def classify_trigger_type(rvol_20, rvol_96):
     """
     Teen mutually-exclusive categories mein classify karta hai.
-
     SHORT_ONLY = sirf short-term threshold pass hua
     LONG_ONLY  = sirf long-term threshold pass hua
     BOTH       = dono pass hue (sabse strict/reliable)
     """
     cond_short = rvol_20 >= RVOL_SHORT_THRESHOLD
     cond_long = rvol_96 >= RVOL_LONG_THRESHOLD
-
     if cond_short and cond_long:
         return "BOTH"
     elif cond_short:
@@ -156,32 +133,26 @@ def classify_trigger_type(rvol_20, rvol_96):
 # ============================================
 # GOOGLE SHEETS — append helper (naya tab, existing tabs ko touch nahi karta)
 # ============================================
-
 _sheets_client = None
 _worksheet = None
 
 
 def _get_worksheet():
     global _sheets_client, _worksheet
-
     if _worksheet is not None:
         return _worksheet
-
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
     creds = Credentials.from_service_account_file(str(config.CREDENTIALS_FILE), scopes=scopes)
     _sheets_client = gspread.authorize(creds)
-
     spreadsheet = _sheets_client.open_by_key(config.SHEET_ID)
-
     try:
         _worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
-        _worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=10)
+        _worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=len(SHEET_HEADER) + 2)
         _worksheet.append_row(SHEET_HEADER)
-
     return _worksheet
 
 
@@ -199,9 +170,9 @@ def log_to_sheet(row_values):
 # ============================================
 # ALERT MESSAGE
 # ============================================
-
 def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
-                          rvol_20, rvol_96, price_position, trend_type, trend_detail, candle_shape_label):
+                         rvol_20, rvol_96, price_position, trend_type, trend_detail,
+                         candle_shape_label):
     trigger_note = {
         "BOTH": "Dono short aur medium-term baseline confirm kar rahe hain — sabse strong signal.",
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
@@ -240,7 +211,6 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
 # ============================================
 # EK SCAN CYCLE
 # ============================================
-
 def run_one_scan():
     print(f"\n{'=' * 60}")
     print(f"SCAN STARTED: {datetime.now()}")
@@ -260,7 +230,6 @@ def run_one_scan():
         except Exception as e:
             print(f"Active pairs laane mein error: {e}")
             return
-
         if MAX_PAIRS_TO_SCAN:
             pairs = pairs[:MAX_PAIRS_TO_SCAN]
 
@@ -272,13 +241,11 @@ def run_one_scan():
     for pair in pairs:
         try:
             df = get_candles(pair=pair, resolution=RESOLUTION, days=2)
-
             if df.empty or len(df) < LOOKBACK_LONG + 1:
                 continue
 
             result = get_intraday_rvol(df, lookback_periods=[LOOKBACK_SHORT, LOOKBACK_LONG])
             last_row = result.iloc[-1]
-
             rvol_20 = last_row[f"RVOL_{LOOKBACK_SHORT}"]
             rvol_96 = last_row[f"RVOL_{LOOKBACK_LONG}"]
 
@@ -291,9 +258,15 @@ def run_one_scan():
                 counts[trigger_type] += 1
 
                 candle_time = last_row["Time"]
+                candle_open = last_row["Open"]
+                candle_high = last_row["High"]
+                candle_low = last_row["Low"]
                 close = last_row["Close"]
                 volume = last_row["Volume"]
                 prev_close = result.iloc[-2]["Close"]
+
+                # candle_color yahin ek baar nikal lo — poore block mein isi ko use karenge
+                candle_color = "GREEN" if close >= candle_open else "RED"
 
                 # ---- SUPPORT/RESISTANCE: price ki position nikaalo ----
                 try:
@@ -311,7 +284,7 @@ def run_one_scan():
 
                 # ---- TRENDLINE: diagonal-line context nikaalo ----
                 try:
-                    trend_ctx = get_trendline_context(df)
+                    trend_ctx = get_trendline_context(df, lookback=TRENDLINE_LOOKBACK)
                     trend_type = trend_ctx["trend"]
                     trend_detail = (
                         f"{trend_ctx['touch_points']} touches | "
@@ -325,9 +298,6 @@ def run_one_scan():
 
                 # ---- CANDLE SHAPE: spike-candle khud Dominance/Rejection/Confusion hai? ----
                 try:
-                    candle_open = last_row["Open"]
-                    candle_high = last_row["High"]
-                    candle_low = last_row["Low"]
                     shape_ctx = classify_candle_shape(candle_open, candle_high, candle_low, close)
                     candle_shape_label = f"{shape_ctx['shape']} ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)"
                 except Exception as e:
@@ -344,7 +314,7 @@ def run_one_scan():
                     rvol_20, rvol_96, price_position, trend_type, trend_detail, candle_shape_label
                 )
 
-                # ---- TELEGRAM: sirf tabhi bhejo jab RVOL_20 >= 6.0 ----
+                # ---- TELEGRAM: sirf tabhi bhejo jab RVOL_20 >= threshold ----
                 if rvol_20 >= RVOL_20_ALERT_THRESHOLD:
                     telegram_sent_count += 1
                     if DRY_RUN:
@@ -376,7 +346,6 @@ def run_one_scan():
 
                 # ---- BACKTEST: is spike ko track karna shuru karo ----
                 try:
-                    candle_color = "GREEN" if close >= candle_open else "RED"
                     backtest_tracker.add_pending(
                         pair=pair,
                         trigger_type=trigger_type,
@@ -408,9 +377,9 @@ def run_one_scan():
 # ENTRY POINT
 # ============================================
 if __name__ == "__main__":
-    print("Intraday Spike Monitor — single scan (GitHub Actions mode)")
+    print("Intraday Spike Monitor — single scan")
     print(f"DRY_RUN = {DRY_RUN}")
     print(f"RVOL_SHORT_THRESHOLD={RVOL_SHORT_THRESHOLD} | RVOL_LONG_THRESHOLD={RVOL_LONG_THRESHOLD}")
     print(f"Telegram sirf RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} pe jayega")
-    print(f"Support/Resistance tracking: ON\n")
+    print(f"Support/Resistance tracking: ON | Trendline tracking: ON | Candle Shape: ON\n")
     run_one_scan()

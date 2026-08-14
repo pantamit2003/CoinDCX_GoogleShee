@@ -29,8 +29,11 @@ NAYA — DUAL TELEGRAM BOT:
     Purana bot (send_telegram_message) — SAARE qualifying signals yahan
     jaate hain, jaisa pehle hota tha.
     Naya bot (send_strong_telegram_message) — SIRF DOMINANCE shape wale
-    high-conviction signals yahan bhi jaate hain, taaki phone pe ek
-    clean, kam-clutter wala channel bhi mile.
+    AUR kisi na kisi S/R level ke relevant (BREAKOUT_ABOVE_RESISTANCE,
+    BREAKDOWN_BELOW_SUPPORT, NEAR_RESISTANCE, NEAR_SUPPORT) signals yahan
+    bhi jaate hain — sirf MID_RANGE (kisi bhi level ke paas nahi) wale
+    is bot ke liye skip hote hain, taaki phone pe ek clean, kam-clutter
+    wala channel bhi mile jisme sirf level-relevant signals hon.
 
 CHALANE KA TARIKA (local testing ke liye bhi):
     python intraday_spike_monitor.py
@@ -76,6 +79,14 @@ WORKSHEET_NAME = "Intraday_Spike_Alerts"
 
 # Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
 TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]
+
+# Strong-bot ke liye — sirf ye Price_Position labels qualify karenge (MID_RANGE excluded)
+STRONG_BOT_ALLOWED_POSITIONS = (
+    "BREAKOUT_ABOVE_RESISTANCE",
+    "BREAKDOWN_BELOW_SUPPORT",
+    "NEAR_RESISTANCE",
+    "NEAR_SUPPORT",
+)
 
 # Sheet header — SR_Level_Price, SR_Touch_Count columns bhi add hue hain
 SHEET_HEADER = [
@@ -346,9 +357,14 @@ def run_one_scan():
                     else:
                         send_telegram_message(message)   # purana bot — sab signals yahan
 
-                        # NAYA — sirf DOMINANCE (strong) shape wale high-conviction
-                        # signals alag, clutter-free bot/chat pe bhi jaate hain
-                        if shape_ctx["shape"] == "DOMINANCE":
+                        # NAYA — sirf DOMINANCE (strong) shape wale AUR
+                        # kisi S/R level ke relevant (BREAKOUT/BREAKDOWN/
+                        # NEAR_RESISTANCE/NEAR_SUPPORT) signals alag,
+                        # clutter-free bot/chat pe bhi jaate hain.
+                        # MID_RANGE yahan skip hota hai.
+                        is_strong_shape = shape_ctx["shape"] == "DOMINANCE"
+                        is_level_relevant = price_position in STRONG_BOT_ALLOWED_POSITIONS
+                        if is_strong_shape and is_level_relevant:
                             strong_telegram_sent_count += 1
                             send_strong_telegram_message(message)
                 else:
@@ -405,7 +421,7 @@ def run_one_scan():
     print(f"\nScan complete. {total_alerts} spike(s) mile — "
           f"BOTH: {counts['BOTH']}, SHORT_ONLY: {counts['SHORT_ONLY']}, LONG_ONLY: {counts['LONG_ONLY']}")
     print(f"Telegram (main) bheja gaya: {telegram_sent_count} (RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} wale)")
-    print(f"Telegram (strong/DOMINANCE) bheja gaya: {strong_telegram_sent_count}")
+    print(f"Telegram (strong/DOMINANCE + level-relevant) bheja gaya: {strong_telegram_sent_count}")
 
 
 # ============================================
@@ -417,5 +433,5 @@ if __name__ == "__main__":
     print(f"RVOL_SHORT_THRESHOLD={RVOL_SHORT_THRESHOLD} | RVOL_LONG_THRESHOLD={RVOL_LONG_THRESHOLD}")
     print(f"Telegram sirf RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} pe jayega")
     print(f"Support/Resistance tracking: ON (with touch-count) | Trendline tracking: ON | Candle Shape: ON")
-    print(f"Dual Telegram: main bot (sab signals) + strong bot (sirf DOMINANCE)\n")
+    print(f"Dual Telegram: main bot (sab signals) + strong bot (DOMINANCE + non-MID_RANGE)\n")
     run_one_scan()

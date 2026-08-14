@@ -5,6 +5,7 @@ Trend + Candle Shape + Confirmation-Candle-Shape tracking)
 PEHLE (v1) local backtest_pending.json file use karta tha — lekin
 GitHub Actions har run mein NAYI, FRESH virtual machine deta hai, isliye
 wo file kabhi persist nahi hoti thi (har run ke baad gayab ho jaati thi).
+
 FIX: Ab "pending spikes" Google Sheet ke ek tab mein store hoti hain
 ("Pending_Spikes") — jo hamesha persistent hai, GitHub Actions ke
 ephemeral-VM problem se bilkul bach jaate hain.
@@ -44,9 +45,11 @@ v4 CHANGE (NAYA): Ab confirmation-candle logic sirf STATUS nahi,
     Telegram confirmation-message mein bhi dikhti hai.
 """
 from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+
 from data.candles import get_candles
 from notifications.telegram_bot import send_telegram_message
 from candle_shape import classify_candle_shape
@@ -112,7 +115,7 @@ def _get_pending_worksheet():
         _pending_ws = spreadsheet.add_worksheet(
             title=PENDING_WORKSHEET_NAME, rows=500, cols=len(PENDING_HEADER) + 2
         )
-        _pending_ws.append_row(PENDING_HEADER)
+        _pending_ws.append_row(PENDING_HEADER, table_range="A1")
     return _pending_ws
 
 
@@ -128,7 +131,7 @@ def _get_results_worksheet():
         _results_ws = spreadsheet.add_worksheet(
             title=RESULTS_WORKSHEET_NAME, rows=5000, cols=len(RESULTS_HEADER) + 2
         )
-        _results_ws.append_row(RESULTS_HEADER)
+        _results_ws.append_row(RESULTS_HEADER, table_range="A1")
     return _results_ws
 
 
@@ -276,7 +279,7 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         candle_shape,
         sr_level_price if sr_level_price is not None else "",
         sr_touch_count,
-    ])
+    ], table_range="A1")
 
 
 # ============================================
@@ -340,7 +343,6 @@ def resolve_pending(dry_run=False):
                 new_status = confirmation_result["status"]
                 n1_shape = confirmation_result["n1_shape"]
                 n2_shape = confirmation_result["n2_shape"]
-
                 confirmation_status = new_status
                 row["Confirmation_Status"] = new_status
                 row["N1_Candle_Shape"] = n1_shape
@@ -401,6 +403,7 @@ def resolve_pending(dry_run=False):
         # Poore max_horizon (75 min) tak ki candle chahiye tabhi fully resolve hoga
         max_target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon)
         found_max, _ = _find_closest_candle(df, max_target_time)
+
         if not found_max:
             # Abhi itna time nahi guzra, agle run mein try karenge
             still_pending.append(row)
@@ -444,7 +447,7 @@ def resolve_pending(dry_run=False):
             print(f"  [backtest_tracker][DRY_RUN] RESOLVED: {result_row}")
         else:
             try:
-                _get_results_worksheet().append_row(result_row)
+                _get_results_worksheet().append_row(result_row, table_range="A1")
             except Exception as e:
                 print(f"  [backtest_tracker] Results likhne mein error: {e}")
                 still_pending.append(row)  # fail hua to pending mein wapas rakho

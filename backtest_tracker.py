@@ -1,28 +1,35 @@
 """
-backtest_tracker.py  (v5 — Cooldown + Fresh V2 Tabs)
+backtest_tracker.py  (v6 — N+1/N+2 Shape + S/R Based Classification)
 =====================================================================
-CHANGES IN THIS VERSION:
+CHANGES IN THIS VERSION (v6):
 
-v5 CHANGE 1 — COOLDOWN LOGIC:
+v6 CHANGE — RICHER CONFIRMATION CLASSIFICATION:
+    Pehle (v5) confirmation sirf itna check karta tha:
+        N+2 High > N+1 High  → CONFIRMED_CONTINUATION
+        N+2 Low  < N+1 Low   → FAILED_BREAKOUT
+    Yeh "DOMINANCE → REJECTION → OPPOSITE DOMINANCE" jaisa specific
+    false-breakout pattern properly capture nahi karta tha — usse
+    generic FAILED_BREAKOUT keh diya jaata tha.
+
+    Ab N+1 aur N+2 ka poora context (shape, direction, rejection_side)
+    use hota hai, 5 categories mein classify karne ke liye:
+        REAL_BREAKOUT            — breakout confirm, N+2 strong same-direction
+        WEAK_BREAKOUT             — breakout confirm hua, par conviction low
+        FAILED_BREAKOUT           — generic adverse break (specific pattern nahi)
+        CONFIRMED_FALSE_BREAKOUT  — DOMINANCE → REJECTION → OPPOSITE DOMINANCE
+        STILL_UNDECIDED           — clear structure nahi bani
+
+    Yeh sirf `_check_breakout_confirmation()` ke andar hua hai —
+    baaki poora system (cooldown, V2 tabs, dual Telegram bot,
+    15/45/75 min price tracking) v5 jaisa hi hai, touch nahi kiya.
+
+v5 CHANGE 1 — COOLDOWN LOGIC (retained):
     Agar koi pair already "Pending_Spikes_V2" mein PENDING hai, to
-    us pair ka naya signal automatically skip ho jayega. Isse same
-    event multiple baar count hone ki problem solve hoti hai jo
-    backtest data ko distort kar rahi thi.
+    us pair ka naya signal automatically skip ho jayega.
 
-v5 CHANGE 2 — FRESH V2 TABS:
-    Ab teeno tabs naye hain:
-    - Pending_Spikes_V2     (purana: Pending_Spikes)
-    - Spike_Backtest_Results_V2  (purana: Spike_Backtest_Results)
-    Purane tabs intact hain — reference ke liye dekh sakte ho.
-    Naya clean data sirf V2 tabs mein jayega.
-
-BAAKI SAB SAME HAI:
-    - Confirmation candle logic (N+1/N+2 High/Low break check)
-    - N+1 aur N+2 candle shape tracking
-    - SR_Level_Price aur SR_Touch_Count carry-forward
-    - Dual Telegram bot (main + strong)
-    - 15/45/75 min price tracking
-    - Stale spike discard (MAX_AGE_HOURS)
+v5 CHANGE 2 — FRESH V2 TABS (retained):
+    - Pending_Spikes_V2
+    - Spike_Backtest_Results_V2
 """
 
 from datetime import datetime, timedelta, timezone
@@ -47,11 +54,14 @@ MATCH_TOLERANCE_MINUTES = 7     # candle-time match karte waqt itni tolerance ra
 PENDING_WORKSHEET_NAME = "Pending_Spikes_V2"
 RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results_V2"
 
+# v6: N1_Direction, N2_Direction, N1_Rejection_Side, N2_Rejection_Side naye columns
 PENDING_HEADER = [
     "Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close",
     "Price_Position", "RVOL_20", "Confirmation_Status",
     "Trend_Type", "Trend_Detail", "Candle_Shape",
     "SR_Level_Price", "SR_Touch_Count",
+    "N1_Candle_Shape", "N2_Candle_Shape",
+    "N1_Direction", "N2_Direction", "N1_Rejection_Side", "N2_Rejection_Side",
 ]
 
 RESULTS_HEADER = [
@@ -61,6 +71,7 @@ RESULTS_HEADER = [
     "Trend_Type", "Trend_Detail", "Candle_Shape",
     "SR_Level_Price", "SR_Touch_Count",
     "N1_Candle_Shape", "N2_Candle_Shape",
+    "N1_Direction", "N2_Direction", "N1_Rejection_Side", "N2_Rejection_Side",
 ]
 
 CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0
@@ -71,6 +82,22 @@ STRONG_BOT_ALLOWED_POSITIONS = (
     "NEAR_RESISTANCE",
     "NEAR_SUPPORT",
 )
+
+# v6: naye 5-way classification labels — emoji aur note dono ke liye
+STATUS_EMOJI = {
+    "REAL_BREAKOUT": "✅",
+    "WEAK_BREAKOUT": "🟡",
+    "FAILED_BREAKOUT": "❌",
+    "CONFIRMED_FALSE_BREAKOUT": "🔻",
+    "STILL_UNDECIDED": "⚪",
+}
+STATUS_NOTE = {
+    "REAL_BREAKOUT": "Breakout genuinely confirm hua — N+2 strong candle ne same direction mein structure break kiya. Conviction high hai.",
+    "WEAK_BREAKOUT": "Breakout ki taraf move hua, par conviction low hai — N+2 weak/uncertain thi. Kam bharosemand continuation.",
+    "FAILED_BREAKOUT": "Breakout expected direction mein sustain nahi hua — price ulti taraf structure tod gaya.",
+    "CONFIRMED_FALSE_BREAKOUT": "Classic false-breakout pattern: spike ke baad rejection, phir opposite direction mein strong dominance — reversal confirm.",
+    "STILL_UNDECIDED": "Abhi clear structure nahi bana — price kisi bhi taraf decisively nahi gaya. Aur wait karo.",
+}
 
 
 # ============================================
@@ -105,7 +132,7 @@ def _get_pending_worksheet():
         _pending_ws = spreadsheet.add_worksheet(
             title=PENDING_WORKSHEET_NAME, rows=500, cols=len(PENDING_HEADER) + 2
         )
-        _pending_ws.append_row(PENDING_HEADER)
+        _pending_ws.append_row(PENDING_HEADER, table_range="A1")
     return _pending_ws
 
 
@@ -121,7 +148,7 @@ def _get_results_worksheet():
         _results_ws = spreadsheet.add_worksheet(
             title=RESULTS_WORKSHEET_NAME, rows=5000, cols=len(RESULTS_HEADER) + 2
         )
-        _results_ws.append_row(RESULTS_HEADER)
+        _results_ws.append_row(RESULTS_HEADER, table_range="A1")
     return _results_ws
 
 
@@ -162,29 +189,34 @@ def _find_closest_row(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES
     return False, None
 
 
-def _shape_label(open_price, high, low, close):
+def _shape_ctx(open_price, high, low, close):
+    """
+    Candle ka OHLC leke poora classify_candle_shape() dict return karta
+    hai (shape, direction, body_pct, strength, rejection_side) — v6 mein
+    ab sirf readable label string nahi, raw fields bhi chahiye taaki
+    classification logic unpe decision le sake.
+    """
     try:
-        ctx = classify_candle_shape(float(open_price), float(high), float(low), float(close))
-        return f"{ctx['shape']} ({ctx['strength']}, body={ctx['body_pct']}%)"
+        return classify_candle_shape(float(open_price), float(high), float(low), float(close))
     except Exception:
+        return {"shape": "UNKNOWN", "direction": "UNKNOWN", "body_pct": 0.0,
+                "strength": "UNKNOWN", "rejection_side": None}
+
+
+def _shape_label(ctx):
+    """ctx dict se readable label string banata hai (Sheet/Telegram ke liye)."""
+    if ctx["shape"] == "UNKNOWN":
         return "UNKNOWN"
+    return f"{ctx['shape']} ({ctx['strength']}, body={ctx['body_pct']}%)"
 
 
 # ============================================
-# COOLDOWN CHECK — v5 NAYA
+# COOLDOWN CHECK
 # ============================================
 def _is_pair_already_pending(records, pair):
     """
     Check karta hai ki given pair already Pending_Spikes_V2 mein
     PENDING status ke saath hai ya nahi.
-
-    Agar hai → naya signal skip karo (cooldown active).
-    Agar nahi → naya signal add karo (fresh event).
-
-    Ye same-event-multiple-count distortion solve karta hai:
-    agar B-CROSS 10:00 pe pending mein gaya, to 10:15 aur 10:30
-    wale signals automatically skip ho jayenge jab tak 10:00 wala
-    resolve na ho jaye.
     """
     for r in records:
         if r.get("Pair") == pair and str(r.get("Confirmation_Status", "")).upper() == "PENDING":
@@ -193,19 +225,82 @@ def _is_pair_already_pending(records, pair):
 
 
 # ============================================
-# CONFIRMATION CANDLE LOGIC
+# v6 — N+1/N+2 SHAPE + S/R BASED CLASSIFICATION
 # ============================================
+def _classify_confirmation(candle_color, n1_ctx, n2_ctx, broke_high, broke_low):
+    """
+    Doc ke Step 2 wala 5-way classification logic.
+
+    candle_color: spike-candle ka GREEN/RED (expected direction)
+    n1_ctx, n2_ctx: classify_candle_shape() ke poore dicts (N+1, N+2 candles)
+    broke_high: N+2 High > N+1 High
+    broke_low:  N+2 Low  < N+1 Low
+
+    Return: classification string (REAL_BREAKOUT / WEAK_BREAKOUT /
+            FAILED_BREAKOUT / CONFIRMED_FALSE_BREAKOUT / STILL_UNDECIDED)
+    """
+    expected_up = (candle_color == "GREEN")
+
+    # "Favorable" = jis taraf spike ki original direction thi, us taraf
+    # structure break hua. "Adverse" = ulti taraf break hua.
+    structure_broken_favorable = (broke_high if expected_up else broke_low)
+    structure_broken_adverse = (broke_low if expected_up else broke_high)
+
+    n2_same_direction = (
+        (n2_ctx["direction"] == "GREEN" and expected_up)
+        or (n2_ctx["direction"] == "RED" and not expected_up)
+    )
+
+    # Spike ki original direction fail hone par jis side ki rejection
+    # aani chahiye thi (GREEN spike fail => UPPER rejection; RED spike
+    # fail => LOWER rejection)
+    failure_rejection_side = "UPPER" if expected_up else "LOWER"
+
+    # ---- 1. CONFIRMED_FALSE_BREAKOUT (sabse specific pattern, pehle check) ----
+    # Pattern: N+1 REJECTION (galat side se) → N+2 OPPOSITE DOMINANCE → adverse break
+    if (
+        n1_ctx["shape"] == "REJECTION"
+        and n1_ctx.get("rejection_side") == failure_rejection_side
+        and n2_ctx["shape"] == "DOMINANCE"
+        and not n2_same_direction
+        and structure_broken_adverse
+    ):
+        return "CONFIRMED_FALSE_BREAKOUT"
+
+    # ---- 2. REAL_BREAKOUT — favorable break + N+2 strong same-direction DOMINANCE ----
+    if (
+        structure_broken_favorable
+        and n2_same_direction
+        and n2_ctx["shape"] == "DOMINANCE"
+        and n2_ctx.get("strength") == "STRONG"
+    ):
+        return "REAL_BREAKOUT"
+
+    # ---- 3. WEAK_BREAKOUT — favorable break hua, par N+2 utni strong nahi ----
+    if structure_broken_favorable and n2_same_direction:
+        return "WEAK_BREAKOUT"
+
+    # ---- 4. FAILED_BREAKOUT — generic adverse break (CONFIRMED_FALSE_BREAKOUT ka specific pattern match nahi hua) ----
+    if structure_broken_adverse:
+        return "FAILED_BREAKOUT"
+
+    # ---- 5. STILL_UNDECIDED — koi clear structure nahi bana ----
+    return "STILL_UNDECIDED"
+
+
 def _check_breakout_confirmation(df, spike_time, candle_color):
     """
-    N+1 (indecision) aur N+2 (confirmation) candles check karta hai.
-    N+2 ki High/Low, N+1 ki High/Low se compare karke status decide
-    karta hai. Dono candles ka shape bhi return karta hai.
+    N+1 (indecision) aur N+2 (confirmation) candles check karta hai,
+    unka poora shape-context nikalta hai, aur _classify_confirmation()
+    se 5-way status decide karwata hai.
 
-    Return: dict ya None
+    Return: dict ya None (agar abhi determine nahi ho sakta)
         {
-            "status": CONFIRMED_CONTINUATION / FAILED_BREAKOUT / STILL_UNDECIDED,
-            "n1_shape": str,
-            "n2_shape": str,
+            "status": ...,
+            "n1_shape": label str, "n2_shape": label str,
+            "n1_direction": GREEN/RED, "n2_direction": GREEN/RED,
+            "n1_rejection_side": UPPER/LOWER/None,
+            "n2_rejection_side": UPPER/LOWER/None,
         }
     """
     target_n1 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 1)
@@ -223,28 +318,19 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
     broke_high = high_n2 > high_n1
     broke_low = low_n2 < low_n1
 
-    if candle_color == "GREEN":
-        if broke_high:
-            status = "CONFIRMED_CONTINUATION"
-        elif broke_low:
-            status = "FAILED_BREAKOUT"
-        else:
-            status = "STILL_UNDECIDED"
-    else:
-        if broke_low:
-            status = "CONFIRMED_CONTINUATION"
-        elif broke_high:
-            status = "FAILED_BREAKOUT"
-        else:
-            status = "STILL_UNDECIDED"
+    n1_ctx = _shape_ctx(row_n1["Open"], high_n1, low_n1, row_n1["Close"])
+    n2_ctx = _shape_ctx(row_n2["Open"], high_n2, low_n2, row_n2["Close"])
 
-    n1_shape = _shape_label(row_n1["Open"], high_n1, low_n1, row_n1["Close"])
-    n2_shape = _shape_label(row_n2["Open"], high_n2, low_n2, row_n2["Close"])
+    status = _classify_confirmation(candle_color, n1_ctx, n2_ctx, broke_high, broke_low)
 
     return {
         "status": status,
-        "n1_shape": n1_shape,
-        "n2_shape": n2_shape,
+        "n1_shape": _shape_label(n1_ctx),
+        "n2_shape": _shape_label(n2_ctx),
+        "n1_direction": n1_ctx["direction"],
+        "n2_direction": n2_ctx["direction"],
+        "n1_rejection_side": n1_ctx.get("rejection_side"),
+        "n2_rejection_side": n2_ctx.get("rejection_side"),
     }
 
 
@@ -256,12 +342,10 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
                  trend_type="UNKNOWN", trend_detail="", candle_shape="UNKNOWN",
                  sr_level_price=None, sr_touch_count=0):
     """
-    Naya spike pending mein add karta hai — lekin pehle COOLDOWN check
-    hota hai. Agar pair already pending mein hai, skip kar deta hai.
+    Naya spike pending mein add karta hai — pehle COOLDOWN check hota hai.
     """
     ws = _get_pending_worksheet()
 
-    # ---- COOLDOWN CHECK (v5 NAYA) ----
     existing_records = ws.get_all_records()
     if _is_pair_already_pending(existing_records, pair):
         print(f"  [cooldown] {pair} already pending mein hai — naya signal skip kiya.")
@@ -281,7 +365,9 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         candle_shape,
         sr_level_price if sr_level_price is not None else "",
         sr_touch_count,
-    ])
+        "", "",   # N1_Candle_Shape, N2_Candle_Shape — abhi khaali, resolve pe bharega
+        "", "", "", "",   # N1_Direction, N2_Direction, N1_Rejection_Side, N2_Rejection_Side
+    ], table_range="A1")
 
 
 # ============================================
@@ -298,7 +384,6 @@ def resolve_pending(dry_run=False):
     now_utc = datetime.now(timezone.utc)
     max_horizon = max(HORIZONS)
 
-    # Pair-wise ek hi baar candles fetch karo (efficient)
     pairs_needed = {r["Pair"] for r in records}
     candle_cache = {}
     for pair in pairs_needed:
@@ -322,8 +407,11 @@ def resolve_pending(dry_run=False):
         confirmation_status = row.get("Confirmation_Status", "PENDING")
         n1_shape = row.get("N1_Candle_Shape", "")
         n2_shape = row.get("N2_Candle_Shape", "")
+        n1_direction = row.get("N1_Direction", "")
+        n2_direction = row.get("N2_Direction", "")
+        n1_rejection_side = row.get("N1_Rejection_Side", "")
+        n2_rejection_side = row.get("N2_Rejection_Side", "")
 
-        # Stale discard
         if now_utc - spike_time > timedelta(hours=MAX_AGE_HOURS):
             print(f"  [backtest_tracker] {pair} @ {row['Spike_Time_UTC']} stale, discard.")
             discarded_count += 1
@@ -341,24 +429,24 @@ def resolve_pending(dry_run=False):
                 new_status = confirmation_result["status"]
                 n1_shape = confirmation_result["n1_shape"]
                 n2_shape = confirmation_result["n2_shape"]
+                n1_direction = confirmation_result["n1_direction"]
+                n2_direction = confirmation_result["n2_direction"]
+                n1_rejection_side = confirmation_result["n1_rejection_side"] or ""
+                n2_rejection_side = confirmation_result["n2_rejection_side"] or ""
 
                 confirmation_status = new_status
                 row["Confirmation_Status"] = new_status
                 row["N1_Candle_Shape"] = n1_shape
                 row["N2_Candle_Shape"] = n2_shape
+                row["N1_Direction"] = n1_direction
+                row["N2_Direction"] = n2_direction
+                row["N1_Rejection_Side"] = n1_rejection_side
+                row["N2_Rejection_Side"] = n2_rejection_side
 
                 if rvol_20 >= CONFIRMATION_ALERT_RVOL_THRESHOLD:
                     confirmation_sent_count += 1
-                    emoji = {
-                        "CONFIRMED_CONTINUATION": "✅",
-                        "FAILED_BREAKOUT": "❌",
-                        "STILL_UNDECIDED": "⚪",
-                    }.get(new_status, "")
-                    status_note = {
-                        "CONFIRMED_CONTINUATION": "Momentum genuinely continue ho raha hai — jis direction mein spike hui thi, price usi taraf aage badh raha hai.",
-                        "FAILED_BREAKOUT": "Ye false breakout tha — price ulti direction mein chala gaya. Trade avoid karna sahi hota.",
-                        "STILL_UNDECIDED": "Abhi clear nahi hai — price kisi bhi taraf decisively nahi gaya. Aur wait karo.",
-                    }.get(new_status, "")
+                    emoji = STATUS_EMOJI.get(new_status, "")
+                    status_note = STATUS_NOTE.get(new_status, "")
 
                     target_n2 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 2)
                     found_n2, row_n2 = _find_closest_row(df, target_n2)
@@ -383,11 +471,12 @@ def resolve_pending(dry_run=False):
                         f"Candle Shape (at spike): {row.get('Candle_Shape', 'N/A')}\n\n"
                         f"<b>Confirmation Result:</b>\n"
                         f"Status: <b>{new_status}</b>\n"
-                        f"Indecision Candle (N+1) Shape: {n1_shape}\n"
-                        f"Confirmation Candle (N+2) Shape: {n2_shape}\n"
+                        f"N+1 (Indecision) Shape: {n1_shape}"
+                        + (f", rejection_side={n1_rejection_side}" if n1_rejection_side else "") + "\n"
+                        f"N+2 (Confirmation) Shape: {n2_shape}"
+                        + (f", rejection_side={n2_rejection_side}" if n2_rejection_side else "") + "\n"
                         f"Move so far (since spike): {pct_move_so_far}\n\n"
-                        f"{status_note}\n\n"
-                        f"(Indecision candle ke High/Low ke against 2nd candle ka result)"
+                        f"{status_note}"
                     )
 
                     if dry_run:
@@ -398,7 +487,6 @@ def resolve_pending(dry_run=False):
                         except Exception as e:
                             print(f"  [backtest_tracker] Confirmation Telegram error: {e}")
 
-                        # Strong bot pe bhi bhejo agar original spike qualify karti thi
                         original_shape = str(row.get("Candle_Shape", ""))
                         original_position = row.get("Price_Position", "UNKNOWN")
                         if (original_shape.startswith("DOMINANCE")
@@ -408,14 +496,12 @@ def resolve_pending(dry_run=False):
                             except Exception as e:
                                 print(f"  [backtest_tracker] Strong-bot confirmation error: {e}")
 
-        # Max horizon tak ki candle chahiye tabhi fully resolve hoga
         max_target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon)
         found_max, _ = _find_closest_candle(df, max_target_time)
         if not found_max:
             still_pending.append(row)
             continue
 
-        # Sab horizons ke liye price nikal lo
         result_row = [
             pair,
             row["Spike_Time_UTC"],
@@ -447,12 +533,16 @@ def resolve_pending(dry_run=False):
         result_row.append(row.get("SR_Touch_Count", 0))
         result_row.append(n1_shape)
         result_row.append(n2_shape)
+        result_row.append(n1_direction)
+        result_row.append(n2_direction)
+        result_row.append(n1_rejection_side)
+        result_row.append(n2_rejection_side)
 
         if dry_run:
             print(f"  [backtest_tracker][DRY_RUN] RESOLVED: {result_row}")
         else:
             try:
-                _get_results_worksheet().append_row(result_row)
+                _get_results_worksheet().append_row(result_row, table_range="A1")
             except Exception as e:
                 print(f"  [backtest_tracker] Results likhne mein error: {e}")
                 still_pending.append(row)
@@ -460,7 +550,6 @@ def resolve_pending(dry_run=False):
 
         resolved_count += 1
 
-    # Pending_Spikes_V2 tab overwrite karo
     if not dry_run:
         try:
             clean_rows = [[
@@ -474,6 +563,12 @@ def resolve_pending(dry_run=False):
                 r.get("Candle_Shape", "UNKNOWN"),
                 r.get("SR_Level_Price", ""),
                 r.get("SR_Touch_Count", 0),
+                r.get("N1_Candle_Shape", ""),
+                r.get("N2_Candle_Shape", ""),
+                r.get("N1_Direction", ""),
+                r.get("N2_Direction", ""),
+                r.get("N1_Rejection_Side", ""),
+                r.get("N2_Rejection_Side", ""),
             ] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)

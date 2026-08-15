@@ -1,7 +1,38 @@
 """
-backtest_tracker.py  (v6 — N+1/N+2 Shape + S/R Based Classification)
+backtest_tracker.py  (v7 — Retest / Level Acceptance Logic)
 =====================================================================
-CHANGES IN THIS VERSION (v6):
+CHANGES IN THIS VERSION (v7):
+
+v7 CHANGE — RETEST / LEVEL ACCEPTANCE (Step 3):
+    Sirf breakout hona "REAL_BREAKOUT" nahi banata — ab hum yeh bhi
+    check karte hain ki breakout ke baad price ne broken level ko
+    RETEST karke HOLD kiya ya nahi.
+
+    Yeh sirf BREAKOUT_ABOVE_RESISTANCE / BREAKDOWN_BELOW_SUPPORT
+    spikes ke liye chalta hai (jahan SR_Level_Price maujood hai) —
+    NEAR_RESISTANCE/NEAR_SUPPORT/MID_RANGE ke liye N/A rehta hai,
+    kyunki wahan koi "broken level" hi nahi hai retest karne ko.
+
+    Timing (future-leak se bachne ke liye): retest sirf T+30 min
+    (N+2) ke BAAD wali candles mein dhoonda jaata hai, T+75 min
+    (poori tracking window) tak — N+1/N+2 ka data is decision mein
+    reuse nahi hota.
+
+    Naya flow: retest_window ke candles ek-ek karke check karo →
+    jaise hi price level ke SR_PROXIMITY_PCT tolerance ke andar
+    wapas aaye → RETEST_DETECTED. Uske baad wali candles mein agar
+    price level ke against decisively close kare → LEVEL_FAILED,
+    warna LEVEL_HELD. Level hold hone ke baad agar price retest-point
+    se aage badh jaaye (breakout direction mein) → SUCCESSFUL_RETEST,
+    warna RETEST_PENDING (window khatam ho gayi, aage ka pata nahi).
+
+    Yeh sirf resolve_pending() ke "fully resolved" step mein compute
+    hota hai (jab poora 75-min window already available hai) — isliye
+    Pending_Spikes_V2 mein koi naya incremental-state tracking nahi
+    chahiye, retest fields sirf Spike_Backtest_Results_V2 mein
+    meaningful values ke saath likhe jaate hain.
+
+CHANGES IN v6 (retained):
 
 v6 CHANGE — RICHER CONFIRMATION CLASSIFICATION:
     Pehle (v5) confirmation sirf itna check karta tha:
@@ -54,7 +85,15 @@ MATCH_TOLERANCE_MINUTES = 7     # candle-time match karte waqt itni tolerance ra
 PENDING_WORKSHEET_NAME = "Pending_Spikes_V2"
 RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results_V2"
 
-# v6: N1_Direction, N2_Direction, N1_Rejection_Side, N2_Rejection_Side naye columns
+# v7: Breakout_Level ... Retest_Confirmation naye columns (retest tracking).
+# Pending mein bhi rakhe hain (naming consistent rehne ke liye) — lekin
+# yeh sirf resolve hone par bharte hain, Pending mein hamesha khaali/"" rahenge.
+_RETEST_COLUMNS = [
+    "Breakout_Level", "Retest_Detected", "Retest_Time", "Retest_Price",
+    "Retest_Depth_Pct", "Level_Held", "Level_Failed",
+    "Post_Retest_Direction", "Retest_Confirmation",
+]
+
 PENDING_HEADER = [
     "Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close",
     "Price_Position", "RVOL_20", "Confirmation_Status",
@@ -62,7 +101,7 @@ PENDING_HEADER = [
     "SR_Level_Price", "SR_Touch_Count",
     "N1_Candle_Shape", "N2_Candle_Shape",
     "N1_Direction", "N2_Direction", "N1_Rejection_Side", "N2_Rejection_Side",
-]
+] + _RETEST_COLUMNS
 
 RESULTS_HEADER = [
     "Pair", "Spike_Time_UTC", "Candle_Color", "Trigger_Type", "Spike_Close", "Price_Position",
@@ -72,9 +111,18 @@ RESULTS_HEADER = [
     "SR_Level_Price", "SR_Touch_Count",
     "N1_Candle_Shape", "N2_Candle_Shape",
     "N1_Direction", "N2_Direction", "N1_Rejection_Side", "N2_Rejection_Side",
-]
+] + _RETEST_COLUMNS
 
 CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0
+
+# v7: retest tolerance — SR_PROXIMITY_PCT jaisa hi concept, taaki system
+# ke "level ke paas" ki definition consistent rahe (intraday_spike_monitor.py
+# mein bhi yehi 0.5 value hai — duplicate rakha hai circular-import se bachne ke liye).
+SR_PROXIMITY_PCT = 0.5
+
+# Retest sirf in Price_Position labels ke liye meaningful hai — kyunki
+# sirf inhi mein ek "broken level" hota hai jo retest ho sake.
+RETEST_APPLICABLE_POSITIONS = ("BREAKOUT_ABOVE_RESISTANCE", "BREAKDOWN_BELOW_SUPPORT")
 
 STRONG_BOT_ALLOWED_POSITIONS = (
     "BREAKOUT_ABOVE_RESISTANCE",
@@ -335,6 +383,139 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
 
 
 # ============================================
+# v7 — RETEST / LEVEL ACCEPTANCE (Step 3)
+# ============================================
+def _empty_retest_result(sr_level_price):
+    """Default retest result — jab retest concept apply hi nahi hota (N/A cases)."""
+    return {
+        "breakout_level": sr_level_price if sr_level_price not in (None, "") else "",
+        "retest_detected": "NO",
+        "retest_time": "",
+        "retest_price": "",
+        "retest_depth_pct": "",
+        "level_held": "",
+        "level_failed": "",
+        "post_retest_direction": "",
+        "retest_confirmation": "NO_RETEST",
+    }
+
+
+def _analyze_retest(df, spike_time, price_position, sr_level_price):
+    """
+    Breakout ke baad price ne broken level ko retest karke hold kiya
+    ya nahi — yeh check karta hai. FUTURE-LEAK SE BACHNE KE LIYE: sirf
+    T+30 min (N+2) ke BAAD wali candles use hoti hain, T+75 min tak.
+
+    Return: dict (upar _empty_retest_result() jaisi shape mein)
+    """
+    result = _empty_retest_result(sr_level_price)
+
+    is_upward = price_position == "BREAKOUT_ABOVE_RESISTANCE"
+    is_downward = price_position == "BREAKDOWN_BELOW_SUPPORT"
+    if not (is_upward or is_downward):
+        return result   # N/A — sirf breakout/breakdown ke liye retest meaningful hai
+    if sr_level_price in (None, ""):
+        return result   # koi level hi nahi pata, retest measure nahi kar sakte
+
+    try:
+        level = float(sr_level_price)
+    except (TypeError, ValueError):
+        return result
+
+    work_df = df.copy()
+    time_col = work_df["Time"]
+    if time_col.dt.tz is None:
+        time_col = time_col.dt.tz_localize("UTC")
+    work_df["_t"] = time_col
+
+    # ---- FUTURE-LEAK GUARD: sirf N+2 (T+30) ke baad, T+75 tak ----
+    window_start = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 2)
+    window_end = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max(HORIZONS))
+    window_df = work_df[(work_df["_t"] > window_start) & (work_df["_t"] <= window_end)]
+    window_df = window_df.sort_values("_t")
+
+    if window_df.empty:
+        return result
+
+    proximity_frac = SR_PROXIMITY_PCT / 100.0
+
+    # ---- RETEST DETECTION: pehli candle dhoondo jo level ke tolerance ke andar wapas aayi ----
+    retest_row = None
+    for _, cand_row in window_df.iterrows():
+        low = float(cand_row["Low"])
+        high = float(cand_row["High"])
+        if is_upward and low <= level * (1 + proximity_frac):
+            retest_row = cand_row
+            break
+        if is_downward and high >= level * (1 - proximity_frac):
+            retest_row = cand_row
+            break
+
+    if retest_row is None:
+        return result   # poori window mein retest hua hi nahi — NO_RETEST
+
+    result["retest_detected"] = "YES"
+    result["retest_time"] = str(retest_row["_t"])
+
+    if is_upward:
+        retest_extreme = float(retest_row["Low"])
+        depth = round((level - retest_extreme) / level * 100, 3)
+    else:
+        retest_extreme = float(retest_row["High"])
+        depth = round((retest_extreme - level) / level * 100, 3)
+    result["retest_price"] = retest_extreme
+    result["retest_depth_pct"] = depth   # positive = level ke against penetrate hua
+
+    # ---- LEVEL HELD vs LEVEL FAILED: retest ke BAAD wali candles check karo ----
+    after_retest_df = window_df[window_df["_t"] > retest_row["_t"]]
+
+    decisive_fail = False
+    for _, cand_row in after_retest_df.iterrows():
+        close_ = float(cand_row["Close"])
+        if is_upward and close_ < level:
+            decisive_fail = True
+            break
+        if is_downward and close_ > level:
+            decisive_fail = True
+            break
+
+    if decisive_fail:
+        result["level_held"] = "NO"
+        result["level_failed"] = "YES"
+    else:
+        result["level_held"] = "YES"
+        result["level_failed"] = "NO"
+
+    if not after_retest_df.empty:
+        first_after = after_retest_df.iloc[0]
+        open_ = float(first_after["Open"])
+        close_ = float(first_after["Close"])
+        result["post_retest_direction"] = "GREEN" if close_ >= open_ else "RED"
+
+    # ---- POST-RETEST CONFIRMATION ----
+    if result["level_failed"] == "YES":
+        result["retest_confirmation"] = "FAILED_RETEST"
+    elif result["level_held"] == "YES" and not after_retest_df.empty:
+        last_close = float(after_retest_df.iloc[-1]["Close"])
+        # "recent local high/low break" — retest-candle ke High/Low ko
+        # reference point maana hai (simplification, doc mein bhi
+        # "recent local high" is tarah approximate karne ka scope tha)
+        if is_upward and last_close > float(retest_row["High"]):
+            result["retest_confirmation"] = "SUCCESSFUL_RETEST"
+        elif is_downward and last_close < float(retest_row["Low"]):
+            result["retest_confirmation"] = "SUCCESSFUL_RETEST"
+        else:
+            # level hold to hui, par window (75 min) khatam ho gayi is se
+            # pehle ki price decisively aage badhe — future data available
+            # nahi hai, isliye honestly PENDING maar rahe hain, SUCCESS nahi
+            result["retest_confirmation"] = "RETEST_PENDING"
+    else:
+        result["retest_confirmation"] = "RETEST_PENDING"
+
+    return result
+
+
+# ============================================
 # PUBLIC: add_pending — naya spike track karna shuru karo
 # ============================================
 def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
@@ -367,6 +548,7 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         sr_touch_count,
         "", "",   # N1_Candle_Shape, N2_Candle_Shape — abhi khaali, resolve pe bharega
         "", "", "", "",   # N1_Direction, N2_Direction, N1_Rejection_Side, N2_Rejection_Side
+        "", "", "", "", "", "", "", "", "",   # retest columns — abhi khaali, resolve pe bharega
     ], table_range="A1")
 
 
@@ -538,6 +720,68 @@ def resolve_pending(dry_run=False):
         result_row.append(n1_rejection_side)
         result_row.append(n2_rejection_side)
 
+        # ---- v7: RETEST / LEVEL ACCEPTANCE — sirf ab compute hota hai,
+        # jab poori 75-min window ka data already available hai (isliye
+        # koi future-leak nahi, aur koi extra incremental pending-state
+        # bhi nahi chahiye) ----
+        retest_result = _analyze_retest(
+            df, spike_time, row.get("Price_Position", "UNKNOWN"), row.get("SR_Level_Price", "")
+        )
+        result_row.append(retest_result["breakout_level"])
+        result_row.append(retest_result["retest_detected"])
+        result_row.append(retest_result["retest_time"])
+        result_row.append(retest_result["retest_price"])
+        result_row.append(retest_result["retest_depth_pct"])
+        result_row.append(retest_result["level_held"])
+        result_row.append(retest_result["level_failed"])
+        result_row.append(retest_result["post_retest_direction"])
+        result_row.append(retest_result["retest_confirmation"])
+
+        # ---- v7: RETEST RESULT Telegram — sirf tab jab retest concept
+        # applicable tha (BREAKOUT/BREAKDOWN) aur spike RVOL-qualified thi.
+        # 75-min mark pe hi bhejte hain, kyunki retest yahin tak resolve hota hai. ----
+        if (
+            retest_result["retest_confirmation"] != "NO_RETEST"
+            and rvol_20 >= CONFIRMATION_ALERT_RVOL_THRESHOLD
+        ):
+            retest_emoji = {
+                "SUCCESSFUL_RETEST": "✅",
+                "FAILED_RETEST": "❌",
+                "RETEST_PENDING": "🕐",
+            }.get(retest_result["retest_confirmation"], "")
+            retest_msg = (
+                f"{retest_emoji} <b>RETEST RESULT — {pair}</b>\n\n"
+                f"Spike Time (IST): {_to_ist_str(row['Spike_Time_UTC'])}\n"
+                f"Price Position: {row.get('Price_Position', 'N/A')}\n"
+                f"Breakout Level: {retest_result['breakout_level']}\n\n"
+                f"Retest Detected: {retest_result['retest_detected']}\n"
+                + (
+                    f"Retest Depth: {retest_result['retest_depth_pct']}%\n"
+                    f"Level Held: {retest_result['level_held']}\n"
+                    f"Level Failed: {retest_result['level_failed']}\n"
+                    if retest_result["retest_detected"] == "YES" else ""
+                )
+                + f"\n<b>Result: {retest_result['retest_confirmation']}</b>\n\n"
+                f"(Yeh sirf record/classification hai, trade instruction nahi — "
+                f"khud verify karke decide karo.)"
+            )
+            if dry_run:
+                print(f"  [DRY_RUN] Retest Result Telegram: {retest_msg}")
+            else:
+                try:
+                    send_telegram_message(retest_msg)
+                except Exception as e:
+                    print(f"  [backtest_tracker] Retest Telegram error: {e}")
+
+                original_shape = str(row.get("Candle_Shape", ""))
+                original_position = row.get("Price_Position", "UNKNOWN")
+                if (original_shape.startswith("DOMINANCE")
+                        and original_position in STRONG_BOT_ALLOWED_POSITIONS):
+                    try:
+                        send_strong_telegram_message(retest_msg)
+                    except Exception as e:
+                        print(f"  [backtest_tracker] Strong-bot retest error: {e}")
+
         if dry_run:
             print(f"  [backtest_tracker][DRY_RUN] RESOLVED: {result_row}")
         else:
@@ -569,6 +813,7 @@ def resolve_pending(dry_run=False):
                 r.get("N2_Direction", ""),
                 r.get("N1_Rejection_Side", ""),
                 r.get("N2_Rejection_Side", ""),
+                "", "", "", "", "", "", "", "", "",   # retest columns — Pending mein hamesha khaali (sirf Results mein bharte hain)
             ] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)

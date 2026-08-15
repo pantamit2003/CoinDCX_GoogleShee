@@ -31,9 +31,16 @@ NAYA — DUAL TELEGRAM BOT:
     Naya bot (send_strong_telegram_message) — SIRF DOMINANCE shape wale
     AUR kisi na kisi S/R level ke relevant (BREAKOUT_ABOVE_RESISTANCE,
     BREAKDOWN_BELOW_SUPPORT, NEAR_RESISTANCE, NEAR_SUPPORT) signals yahan
-    bhi jaate hain — sirf MID_RANGE (kisi bhi level ke paas nahi) wale
-    is bot ke liye skip hote hain, taaki phone pe ek clean, kam-clutter
-    wala channel bhi mile jisme sirf level-relevant signals hon.
+    bhi jaate hain — sirf MID_RANGE wale skip hote hain.
+
+NAYA — COOLDOWN LOGIC (v2):
+    Agar koi pair already Pending_Spikes_V2 mein PENDING hai (matlab
+    pichla signal abhi resolve nahi hua, ~60-75 min effective cooldown),
+    to us pair ke liye naya signal:
+    - Telegram pe nahi jayega
+    - Sheet mein log nahi hoga
+    - backtest mein nahi jayega
+    Ye same-event-multiple-count distortion solve karta hai.
 
 CHALANE KA TARIKA (local testing ke liye bhi):
     python intraday_spike_monitor.py
@@ -54,6 +61,7 @@ from candle_shape import classify_candle_shape
 import backtest_tracker
 import config
 
+
 # ============================================
 # CONFIG — pehle inhe apni marzi se set karo
 # ============================================
@@ -66,21 +74,19 @@ RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye (Sheet-loggi
 RVOL_LONG_THRESHOLD = 6.0    # RVOL_96 kam se kam itna hona chahiye (Sheet-logging ke liye)
 RVOL_20_ALERT_THRESHOLD = 6.0   # Telegram alert SIRF tabhi jayega jab RVOL_20 isse zyada ho
 
-SR_LOOKBACK = 50              # kitne candles se S/R levels nikaalne hain
-SR_CLUSTER_TOLERANCE_PCT = 0.5   # itne % ke andar wale swing points ek level maane jaayenge
-SR_PROXIMITY_PCT = 0.5           # itne % ke andar ho to "NEAR" maana jaayega
+SR_LOOKBACK = 50
+SR_CLUSTER_TOLERANCE_PCT = 0.5
+SR_PROXIMITY_PCT = 0.5
 
-TRENDLINE_LOOKBACK = 60       # kitni candles peeche jaake trendline fit karni hai
+TRENDLINE_LOOKBACK = 60
 
-MAX_PAIRS_TO_SCAN = 250    # None = saare active pairs, ya testing ke liye number daalo jaise 20
-SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
+MAX_PAIRS_TO_SCAN = 250
+SLEEP_BETWEEN_PAIRS = 0.3
 
 WORKSHEET_NAME = "Intraday_Spike_Alerts_V2"
 
-# Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
-TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]
+TEST_ONLY_PAIRS = []
 
-# Strong-bot ke liye — sirf ye Price_Position labels qualify karenge (MID_RANGE excluded)
 STRONG_BOT_ALLOWED_POSITIONS = (
     "BREAKOUT_ABOVE_RESISTANCE",
     "BREAKDOWN_BELOW_SUPPORT",
@@ -88,7 +94,6 @@ STRONG_BOT_ALLOWED_POSITIONS = (
     "NEAR_SUPPORT",
 )
 
-# Sheet header — SR_Level_Price, SR_Touch_Count columns bhi add hue hain
 SHEET_HEADER = [
     "Detected_At_IST", "Candle_Time_UTC", "Pair", "Trigger_Type",
     "Close", "Volume", "RVOL_20", "RVOL_96",
@@ -98,10 +103,54 @@ SHEET_HEADER = [
 
 
 # ============================================
+# COOLDOWN — pending pairs cache
+# ============================================
+# Har scan run ke start mein Pending_Spikes_V2 se ek baar fetch karke
+# ye set banate hain — taaki har pair ke liye alag-alag Sheet API call
+# na ho (efficient hai).
+_pending_pairs_cache = None
+
+
+def _load_pending_pairs_cache():
+    """
+    Pending_Spikes_V2 tab se saare PENDING pairs ek baar fetch karta hai.
+    Result ek set mein store hota hai — O(1) lookup ke liye.
+    Ye function sirf ek baar (run ke start mein) call hoga.
+    """
+    global _pending_pairs_cache
+    if _pending_pairs_cache is not None:
+        return _pending_pairs_cache
+
+    try:
+        ws = backtest_tracker._get_pending_worksheet()
+        records = ws.get_all_records()
+        _pending_pairs_cache = {
+            r["Pair"]
+            for r in records
+            if str(r.get("Confirmation_Status", "")).upper() == "PENDING"
+        }
+        print(f"  [cooldown] Pending pairs loaded: {len(_pending_pairs_cache)} pairs currently in cooldown.")
+    except Exception as e:
+        print(f"  [cooldown] Pending pairs fetch error (cooldown disabled this run): {e}")
+        _pending_pairs_cache = set()  # empty set — koi cooldown nahi, safe fallback
+
+    return _pending_pairs_cache
+
+
+def _is_in_cooldown(pair):
+    """
+    Check karta hai ki ye pair abhi cooldown mein hai ya nahi.
+    Cooldown tab khatam hota hai jab pair ka signal resolve ho jata hai
+    (CONFIRMED_CONTINUATION / FAILED_BREAKOUT / STILL_UNDECIDED).
+    Effective cooldown ~60-75 min hota hai (N+1 + N+2 + resolve cycle).
+    """
+    return pair in _load_pending_pairs_cache()
+
+
+# ============================================
 # TIME HELPERS
 # ============================================
 def to_ist(utc_dt):
-    """UTC candle time ko IST (Indian Standard Time) string mein convert karta hai."""
     dt = pd.to_datetime(utc_dt)
     if dt.tzinfo is None:
         dt = dt.tz_localize("UTC")
@@ -113,11 +162,6 @@ def to_ist(utc_dt):
 # RVOL CALCULATION
 # ============================================
 def get_intraday_rvol(df, lookback_periods):
-    """
-    Har candle ka RVOL nikalta hai, uske pichle N candles ke average se
-    compare karke. shift(1) isliye taaki current candle apne khud ke
-    average mein shaamil na ho.
-    """
     df = df.copy()
     for period in lookback_periods:
         avg_col = f"avg_vol_{period}"
@@ -129,15 +173,9 @@ def get_intraday_rvol(df, lookback_periods):
 
 
 # ============================================
-# 3 INDEPENDENT CONDITIONS — backtesting ke liye alag-alag
+# 3 INDEPENDENT CONDITIONS
 # ============================================
 def classify_trigger_type(rvol_20, rvol_96):
-    """
-    Teen mutually-exclusive categories mein classify karta hai.
-    SHORT_ONLY = sirf short-term threshold pass hua
-    LONG_ONLY  = sirf long-term threshold pass hua
-    BOTH       = dono pass hue (sabse strict/reliable)
-    """
     cond_short = rvol_20 >= RVOL_SHORT_THRESHOLD
     cond_long = rvol_96 >= RVOL_LONG_THRESHOLD
     if cond_short and cond_long:
@@ -151,7 +189,7 @@ def classify_trigger_type(rvol_20, rvol_96):
 
 
 # ============================================
-# GOOGLE SHEETS — append helper (naya tab, existing tabs ko touch nahi karta)
+# GOOGLE SHEETS
 # ============================================
 _sheets_client = None
 _worksheet = None
@@ -171,7 +209,9 @@ def _get_worksheet():
     try:
         _worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
-        _worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=len(SHEET_HEADER) + 2)
+        _worksheet = spreadsheet.add_worksheet(
+            title=WORKSHEET_NAME, rows=2000, cols=len(SHEET_HEADER) + 2
+        )
         _worksheet.append_row(SHEET_HEADER, table_range="A1")
     return _worksheet
 
@@ -191,8 +231,8 @@ def log_to_sheet(row_values):
 # ALERT MESSAGE
 # ============================================
 def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
-                         rvol_20, rvol_96, price_position_label, sr_level_price, sr_touch_count,
-                         trend_type, trend_detail, candle_shape_label):
+                         rvol_20, rvol_96, price_position_label, sr_level_price,
+                         sr_touch_count, trend_type, trend_detail, candle_shape_label):
     trigger_note = {
         "BOTH": "Dono short aur medium-term baseline confirm kar rahe hain — sabse strong signal.",
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
@@ -207,7 +247,6 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "MID_RANGE": "Kisi bhi major level ke paas nahi — range ke beech mein.",
     }.get(price_position_label, "")
 
-    # S/R line — sirf tabhi extra info dikhao jab koi relevant level mila ho (MID_RANGE mein nahi hoga)
     sr_line = f"<b>Price Position:</b> {price_position_label}"
     if sr_level_price is not None:
         sr_line += f" (Level: {sr_level_price}, tested {sr_touch_count}x pehle)"
@@ -237,15 +276,24 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
 # EK SCAN CYCLE
 # ============================================
 def run_one_scan():
+    global _pending_pairs_cache
+
     print(f"\n{'=' * 60}")
     print(f"SCAN STARTED: {datetime.now()}")
     print('=' * 60)
+
+    # ---- Cache reset karo har naye run mein ----
+    # (taaki fresh pending list mile, stale cache se kaam na ho)
+    _pending_pairs_cache = None
 
     # ---- BACKTEST: sabse pehle purani pending spikes check karo ----
     try:
         backtest_tracker.resolve_pending(dry_run=DRY_RUN)
     except Exception as e:
         print(f"  [backtest_tracker] resolve_pending mein error: {e}")
+
+    # ---- Cooldown cache load karo (resolve ke baad, taaki fresh data mile) ----
+    _load_pending_pairs_cache()
 
     if TEST_ONLY_PAIRS:
         pairs = TEST_ONLY_PAIRS
@@ -263,6 +311,7 @@ def run_one_scan():
     counts = {"SHORT_ONLY": 0, "LONG_ONLY": 0, "BOTH": 0}
     telegram_sent_count = 0
     strong_telegram_sent_count = 0
+    cooldown_skipped_count = 0
 
     for pair in pairs:
         try:
@@ -283,6 +332,14 @@ def run_one_scan():
             if trigger_type is not None:
                 counts[trigger_type] += 1
 
+                # ---- COOLDOWN CHECK — sabse pehle ----
+                # Agar pair already pending mein hai, poora block skip karo.
+                # Telegram nahi, Sheet nahi, backtest nahi.
+                if _is_in_cooldown(pair):
+                    cooldown_skipped_count += 1
+                    print(f"  [cooldown] {pair} skip — already pending/cooldown mein hai.")
+                    continue
+
                 candle_time = last_row["Time"]
                 candle_open = last_row["Open"]
                 candle_high = last_row["High"]
@@ -291,10 +348,9 @@ def run_one_scan():
                 volume = last_row["Volume"]
                 prev_close = result.iloc[-2]["Close"]
 
-                # candle_color yahin ek baar nikal lo — poore block mein isi ko use karenge
                 candle_color = "GREEN" if close >= candle_open else "RED"
 
-                # ---- SUPPORT/RESISTANCE: price ki position + touch-count nikaalo ----
+                # ---- SUPPORT/RESISTANCE ----
                 try:
                     resistance_levels, support_levels = get_support_resistance(
                         df, lookback=SR_LOOKBACK,
@@ -313,7 +369,7 @@ def run_one_scan():
                     sr_level_price = None
                     sr_touch_count = 0
 
-                # ---- TRENDLINE: diagonal-line context nikaalo ----
+                # ---- TRENDLINE ----
                 try:
                     trend_ctx = get_trendline_context(df, lookback=TRENDLINE_LOOKBACK)
                     trend_type = trend_ctx["trend"]
@@ -327,9 +383,7 @@ def run_one_scan():
                     trend_type = "UNKNOWN"
                     trend_detail = ""
 
-                # ---- CANDLE SHAPE: spike-candle khud Dominance/Rejection/Confusion hai? ----
-                # shape_ctx ko try ke bahar bhi default value milta hai (crash-safety),
-                # taaki neeche "if shape_ctx['shape'] == 'DOMINANCE'" check kabhi crash na ho
+                # ---- CANDLE SHAPE ----
                 try:
                     shape_ctx = classify_candle_shape(candle_open, candle_high, candle_low, close)
                     candle_shape_label = f"{shape_ctx['shape']} ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)"
@@ -349,19 +403,14 @@ def run_one_scan():
                     trend_type, trend_detail, candle_shape_label
                 )
 
-                # ---- TELEGRAM: sirf tabhi bhejo jab RVOL_20 >= threshold ----
+                # ---- TELEGRAM ----
                 if rvol_20 >= RVOL_20_ALERT_THRESHOLD:
                     telegram_sent_count += 1
                     if DRY_RUN:
                         print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
                     else:
-                        send_telegram_message(message)   # purana bot — sab signals yahan
+                        send_telegram_message(message)
 
-                        # NAYA — sirf DOMINANCE (strong) shape wale AUR
-                        # kisi S/R level ke relevant (BREAKOUT/BREAKDOWN/
-                        # NEAR_RESISTANCE/NEAR_SUPPORT) signals alag,
-                        # clutter-free bot/chat pe bhi jaate hain.
-                        # MID_RANGE yahan skip hota hai.
                         is_strong_shape = shape_ctx["shape"] == "DOMINANCE"
                         is_level_relevant = price_position in STRONG_BOT_ALLOWED_POSITIONS
                         if is_strong_shape and is_level_relevant:
@@ -372,9 +421,10 @@ def run_one_scan():
                           f"Telegram skip — sirf Sheet mein log hua)")
 
                 # ---- SHEET LOGGING ----
-                detected_at_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                detected_at_ist = (
+                    datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+
                 log_to_sheet([
                     detected_at_ist,
                     str(candle_time),
@@ -392,7 +442,7 @@ def run_one_scan():
                     candle_shape_label,
                 ])
 
-                # ---- BACKTEST: is spike ko track karna shuru karo ----
+                # ---- BACKTEST ----
                 try:
                     backtest_tracker.add_pending(
                         pair=pair,
@@ -419,8 +469,11 @@ def run_one_scan():
 
     total_alerts = sum(counts.values())
     print(f"\nScan complete. {total_alerts} spike(s) mile — "
-          f"BOTH: {counts['BOTH']}, SHORT_ONLY: {counts['SHORT_ONLY']}, LONG_ONLY: {counts['LONG_ONLY']}")
-    print(f"Telegram (main) bheja gaya: {telegram_sent_count} (RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} wale)")
+          f"BOTH: {counts['BOTH']}, SHORT_ONLY: {counts['SHORT_ONLY']}, "
+          f"LONG_ONLY: {counts['LONG_ONLY']}")
+    print(f"Cooldown ke wajah se skip hue: {cooldown_skipped_count}")
+    print(f"Telegram (main) bheja gaya: {telegram_sent_count} "
+          f"(RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} wale)")
     print(f"Telegram (strong/DOMINANCE + level-relevant) bheja gaya: {strong_telegram_sent_count}")
 
 
@@ -432,6 +485,6 @@ if __name__ == "__main__":
     print(f"DRY_RUN = {DRY_RUN}")
     print(f"RVOL_SHORT_THRESHOLD={RVOL_SHORT_THRESHOLD} | RVOL_LONG_THRESHOLD={RVOL_LONG_THRESHOLD}")
     print(f"Telegram sirf RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} pe jayega")
-    print(f"Support/Resistance tracking: ON (with touch-count) | Trendline tracking: ON | Candle Shape: ON")
-    print(f"Dual Telegram: main bot (sab signals) + strong bot (DOMINANCE + non-MID_RANGE)\n")
+    print(f"Support/Resistance: ON | Trendline: ON | Candle Shape: ON")
+    print(f"Cooldown: ON (Pending_Spikes_V2 se) | Dual Telegram: ON\n")
     run_one_scan()

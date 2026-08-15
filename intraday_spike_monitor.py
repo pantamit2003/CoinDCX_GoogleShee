@@ -75,7 +75,7 @@ TRENDLINE_LOOKBACK = 60       # kitni candles peeche jaake trendline fit karni h
 MAX_PAIRS_TO_SCAN = 250    # None = saare active pairs, ya testing ke liye number daalo jaise 20
 SLEEP_BETWEEN_PAIRS = 0.3    # API ko overload na karein, har pair ke beech thoda ruk jao (seconds)
 
-WORKSHEET_NAME = "Intraday_Spike_Alerts"
+WORKSHEET_NAME = "Intraday_Spike_Alerts_V2"
 
 # Agar sirf specific coins pe test karna hai (jaise abhi), yahan list daal do.
 TEST_ONLY_PAIRS = []  # example: ["B-SQD_USDT", "B-VELODROME_USDT"]

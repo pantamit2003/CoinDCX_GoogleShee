@@ -1,55 +1,28 @@
 """
-backtest_tracker.py  (v5 — Google Sheet based, GitHub Actions-safe,
-Trend + Candle Shape + Confirmation-Candle-Shape + Target/ATR tracking)
+backtest_tracker.py  (v5 — Cooldown + Fresh V2 Tabs)
 =====================================================================
-PEHLE (v1) local backtest_pending.json file use karta tha — lekin
-GitHub Actions har run mein NAYI, FRESH virtual machine deta hai, isliye
-wo file kabhi persist nahi hoti thi (har run ke baad gayab ho jaati thi).
+CHANGES IN THIS VERSION:
 
-FIX: Ab "pending spikes" Google Sheet ke ek tab mein store hoti hain
-("Pending_Spikes") — jo hamesha persistent hai, GitHub Actions ke
-ephemeral-VM problem se bilkul bach jaate hain.
+v5 CHANGE 1 — COOLDOWN LOGIC:
+    Agar koi pair already "Pending_Spikes_V2" mein PENDING hai, to
+    us pair ka naya signal automatically skip ho jayega. Isse same
+    event multiple baar count hone ki problem solve hoti hai jo
+    backtest data ko distort kar rahi thi.
 
-POORA FLOW:
-    1. intraday_spike_monitor.py mein jab naya spike detect ho:
-       add_pending(...) call hota hai → row "Pending_Spikes" tab mein
-       likha jaata hai.
+v5 CHANGE 2 — FRESH V2 TABS:
+    Ab teeno tabs naye hain:
+    - Pending_Spikes_V2     (purana: Pending_Spikes)
+    - Spike_Backtest_Results_V2  (purana: Spike_Backtest_Results)
+    Purane tabs intact hain — reference ke liye dekh sakte ho.
+    Naya clean data sirf V2 tabs mein jayega.
 
-    2. Har naye run ki SHURUAAT mein:
-       resolve_pending(dry_run=...) call hota hai →
-         - "Pending_Spikes" tab se saari pending spikes padhta hai
-         - Har spike ke liye check karta hai ki 15/45/75 min baad ki
-           candle data mein aa chuki hai ya nahi
-         - Agar aa chuki hai (matlab poora 75-min tak track ho chuka):
-             → result "Spike_Backtest_Results" tab mein likh deta hai
-             → us spike ko "Pending_Spikes" se hata deta hai
-         - Agar abhi tak nahi aayi:
-             → wapas "Pending_Spikes" mein rakh deta hai (agle run mein
-               phir check hoga)
-         - Agar spike bahut purani ho gayi (MAX_AGE_HOURS se zyada,
-           jaise pair delist ho gaya ho ya data-gap ho) → discard
-
-IMPORTANT FIX (tolerance matching):
-    v1 mein candle-time ka EXACT match dhoondte the, jo GitHub Actions
-    ke late/early runs mein kabhi match hi nahi karta tha. Ab hum
-    "closest candle within tolerance" dhoondte hain — zyada robust hai.
-
-v3 CHANGE: Trend_Type, Trend_Detail, Candle_Shape (spike-candle ka)
-    ab har pending/result row mein store/carry-forward hote hain.
-
-v4 CHANGE: Ab confirmation-candle logic sirf STATUS nahi, balki N+1
-    (indecision candle) aur N+2 (confirmation candle) ka SHAPE bhi
-    return karta hai. Isse pata chalta hai ki jis candle ka High/Low
-    toda gaya, wo khud kitni "strong/weak" thi.
-
-v5 CHANGE (NAYA): CONFIRMED_CONTINUATION ke case mein ab message mein
-    Risk:Reward based Target levels (2:1/3:1/4:1) aur ATR-based
-    volatility check (target tak pahunchne mein roughly kitna time
-    lagega, coin ke apne typical move ke hisaab se) bhi add hote hain.
-    Stop-loss reference = N+1 candle ka opposite extreme (jise todne
-    se hi breakout FAILED maana jaata — natural invalidation point).
-    Ye info same `msg` ke through dono bots (regular + strong, jab bhi
-    strong-criteria match kare) mein automatically pahunch jaati hai.
+BAAKI SAB SAME HAI:
+    - Confirmation candle logic (N+1/N+2 High/Low break check)
+    - N+1 aur N+2 candle shape tracking
+    - SR_Level_Price aur SR_Touch_Count carry-forward
+    - Dual Telegram bot (main + strong)
+    - 15/45/75 min price tracking
+    - Stale spike discard (MAX_AGE_HOURS)
 """
 
 from datetime import datetime, timedelta, timezone
@@ -61,7 +34,6 @@ from google.oauth2.service_account import Credentials
 from data.candles import get_candles
 from notifications.telegram_bot import send_telegram_message, send_strong_telegram_message
 from candle_shape import classify_candle_shape
-from atr import calculate_atr, estimate_candles_to_target
 import config
 
 
@@ -71,14 +43,15 @@ RESOLUTION_MINUTES = 15
 MAX_AGE_HOURS = 6               # itne ghante baad bhi resolve na ho paaye toh discard
 MATCH_TOLERANCE_MINUTES = 7     # candle-time match karte waqt itni tolerance rakho
 
-PENDING_WORKSHEET_NAME = "Pending_Spikes"
-RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results"
+# ---- V2 TABS — fresh clean data yahan jayega ----
+PENDING_WORKSHEET_NAME = "Pending_Spikes_V2"
+RESULTS_WORKSHEET_NAME = "Spike_Backtest_Results_V2"
 
 PENDING_HEADER = [
     "Pair", "Trigger_Type", "Candle_Color", "Spike_Time_UTC", "Spike_Close",
     "Price_Position", "RVOL_20", "Confirmation_Status",
     "Trend_Type", "Trend_Detail", "Candle_Shape",
-    "SR_Level_Price", "SR_Touch_Count", "N1_Alert_Sent",
+    "SR_Level_Price", "SR_Touch_Count",
 ]
 
 RESULTS_HEADER = [
@@ -88,14 +61,10 @@ RESULTS_HEADER = [
     "Trend_Type", "Trend_Detail", "Candle_Shape",
     "SR_Level_Price", "SR_Touch_Count",
     "N1_Candle_Shape", "N2_Candle_Shape",
-    "ATR_Pct", "Target_2R", "Target_3R", "Target_4R",
 ]
 
-CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0   # sirf strong-signal spikes ko hi confirmation-alert bhejo
+CONFIRMATION_ALERT_RVOL_THRESHOLD = 6.0
 
-# Strong-bot ke liye — sirf ye Price_Position labels qualify karenge (MID_RANGE excluded).
-# intraday_spike_monitor.py mein bhi yehi list hai (duplicate rakha hai taaki circular
-# import na ho — intraday_spike_monitor.py khud backtest_tracker.py ko import karta hai).
 STRONG_BOT_ALLOWED_POSITIONS = (
     "BREAKOUT_ABOVE_RESISTANCE",
     "BREAKDOWN_BELOW_SUPPORT",
@@ -105,9 +74,8 @@ STRONG_BOT_ALLOWED_POSITIONS = (
 
 
 # ============================================
-# GOOGLE SHEETS CONNECTION (dono tabs ke liye shared)
+# GOOGLE SHEETS CONNECTION
 # ============================================
-
 _client = None
 _pending_ws = None
 _results_ws = None
@@ -129,18 +97,15 @@ def _get_pending_worksheet():
     global _pending_ws
     if _pending_ws is not None:
         return _pending_ws
-
     client = _connect()
     spreadsheet = client.open_by_key(config.SHEET_ID)
-
     try:
         _pending_ws = spreadsheet.worksheet(PENDING_WORKSHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
         _pending_ws = spreadsheet.add_worksheet(
             title=PENDING_WORKSHEET_NAME, rows=500, cols=len(PENDING_HEADER) + 2
         )
-        _pending_ws.append_row(PENDING_HEADER, table_range="A1")
-
+        _pending_ws.append_row(PENDING_HEADER)
     return _pending_ws
 
 
@@ -148,27 +113,22 @@ def _get_results_worksheet():
     global _results_ws
     if _results_ws is not None:
         return _results_ws
-
     client = _connect()
     spreadsheet = client.open_by_key(config.SHEET_ID)
-
     try:
         _results_ws = spreadsheet.worksheet(RESULTS_WORKSHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
         _results_ws = spreadsheet.add_worksheet(
             title=RESULTS_WORKSHEET_NAME, rows=5000, cols=len(RESULTS_HEADER) + 2
         )
-        _results_ws.append_row(RESULTS_HEADER, table_range="A1")
-
+        _results_ws.append_row(RESULTS_HEADER)
     return _results_ws
 
 
 # ============================================
 # HELPERS
 # ============================================
-
 def _to_utc_dt(value):
-    """String ya pandas Timestamp ko tz-aware UTC datetime mein convert karta hai."""
     dt = pd.to_datetime(value)
     if dt.tzinfo is None:
         dt = dt.tz_localize("UTC")
@@ -176,7 +136,6 @@ def _to_utc_dt(value):
 
 
 def _to_ist_str(value):
-    """UTC string/datetime ko IST string mein convert karta hai (Telegram message ke liye)."""
     dt = pd.to_datetime(value)
     if dt.tzinfo is None:
         dt = dt.tz_localize("UTC")
@@ -185,13 +144,6 @@ def _to_ist_str(value):
 
 
 def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES):
-    """
-    df ke 'Time' column mein target_time ke sabse paas wali candle dhoondta
-    hai, agar tolerance ke andar ho. Exact-match ki jagah ye zyada robust
-    hai (GitHub Actions ke late-run scenarios mein bhi kaam karega).
-
-    Return: (found: bool, close_price: float ya None)
-    """
     found, row = _find_closest_row(df, target_time, tolerance_minutes)
     if found:
         return True, float(row["Close"])
@@ -199,29 +151,18 @@ def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINU
 
 
 def _find_closest_row(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES):
-    """
-    Same as _find_closest_candle, lekin poori row (Open/High/Low/Close)
-    return karta hai — confirmation-candle logic ko High/Low bhi chahiye,
-    sirf Close nahi.
-
-    Return: (found: bool, row ya None)
-    """
     df_times = df["Time"]
     if df_times.dt.tz is None:
         df_times = df_times.dt.tz_localize("UTC")
-
     diffs = (df_times - target_time).abs()
     min_idx = diffs.idxmin()
     min_diff = diffs.loc[min_idx]
-
     if min_diff <= timedelta(minutes=tolerance_minutes):
         return True, df.loc[min_idx]
-
     return False, None
 
 
 def _shape_label(open_price, high, low, close):
-    """Candle ka OHLC leke ek readable shape-label string banata hai."""
     try:
         ctx = classify_candle_shape(float(open_price), float(high), float(low), float(close))
         return f"{ctx['shape']} ({ctx['strength']}, body={ctx['body_pct']}%)"
@@ -229,29 +170,42 @@ def _shape_label(open_price, high, low, close):
         return "UNKNOWN"
 
 
+# ============================================
+# COOLDOWN CHECK — v5 NAYA
+# ============================================
+def _is_pair_already_pending(records, pair):
+    """
+    Check karta hai ki given pair already Pending_Spikes_V2 mein
+    PENDING status ke saath hai ya nahi.
+
+    Agar hai → naya signal skip karo (cooldown active).
+    Agar nahi → naya signal add karo (fresh event).
+
+    Ye same-event-multiple-count distortion solve karta hai:
+    agar B-CROSS 10:00 pe pending mein gaya, to 10:15 aur 10:30
+    wale signals automatically skip ho jayenge jab tak 10:00 wala
+    resolve na ho jaye.
+    """
+    for r in records:
+        if r.get("Pair") == pair and str(r.get("Confirmation_Status", "")).upper() == "PENDING":
+            return True
+    return False
+
+
+# ============================================
+# CONFIRMATION CANDLE LOGIC
+# ============================================
 def _check_breakout_confirmation(df, spike_time, candle_color):
     """
-    'confirmation candle' logic:
-    - Candle N+1 (spike ke 15 min baad) = "indecision candle", uska High/Low note karo
-    - Candle N+2 (spike ke 30 min baad) = "confirmation candle"
-    - Agar N+2 ki High, N+1 ki High se upar nikal gayi -> CONFIRMED_CONTINUATION
-    - Agar N+2 ki Low, N+1 ki Low se neeche gayi -> FAILED_BREAKOUT
-    - Dono nahi tuti -> STILL_UNDECIDED
-    - Agar N+2 ki candle abhi data mein nahi aayi -> None (abhi wait karo)
+    N+1 (indecision) aur N+2 (confirmation) candles check karta hai.
+    N+2 ki High/Low, N+1 ki High/Low se compare karke status decide
+    karta hai. Dono candles ka shape bhi return karta hai.
 
-    N1 aur N2 dono candles ka SHAPE bhi nikalta hai — taaki pata chale
-    jis candle ka High/Low toda gaya, wo khud kitni "strong" thi.
-
-    N1 ki High/Low bhi return karta hai — target-price (Risk:Reward)
-    calculate karne ke liye chahiye hoti hai (stop-loss reference point).
-
-    Return: dict ya None (agar abhi determine nahi ho sakta)
+    Return: dict ya None
         {
-            "status": "CONFIRMED_CONTINUATION"/"FAILED_BREAKOUT"/"STILL_UNDECIDED",
-            "n1_shape": readable shape string (indecision candle ka),
-            "n2_shape": readable shape string (confirmation candle ka),
-            "n1_high": float,
-            "n1_low": float,
+            "status": CONFIRMED_CONTINUATION / FAILED_BREAKOUT / STILL_UNDECIDED,
+            "n1_shape": str,
+            "n2_shape": str,
         }
     """
     target_n1 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 1)
@@ -261,7 +215,7 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
     found_n2, row_n2 = _find_closest_row(df, target_n2)
 
     if not found_n1 or not found_n2:
-        return None  # abhi itna time nahi guzra
+        return None
 
     high_n1, low_n1 = float(row_n1["High"]), float(row_n1["Low"])
     high_n2, low_n2 = float(row_n2["High"]), float(row_n2["Low"])
@@ -291,133 +245,28 @@ def _check_breakout_confirmation(df, spike_time, candle_color):
         "status": status,
         "n1_shape": n1_shape,
         "n2_shape": n2_shape,
-        "n1_high": high_n1,
-        "n1_low": low_n1,
     }
-
-
-def _build_target_and_atr_block(df, spike_close, candle_color, n1_high, n1_low):
-    """
-    NAYA (v5) — CONFIRMED_CONTINUATION ke case mein call hota hai.
-
-    1. Risk:Reward based targets (2:1, 3:1, 4:1) nikalta hai — Stop-Loss
-       = N+1 candle ka opposite extreme (natural invalidation point).
-    2. ATR (coin ka typical 15-min move %) nikaal ke, 2:1 target tak
-       pahunchne mein roughly kitni candles/minutes lagengi wo estimate
-       karta hai — taaki pata chale ye "FAST" coin hai ya "SLOW".
-
-    Return: (message_text: str, atr_pct: float ya None, t2, t3, t4: float ya None)
-    """
-    if candle_color == "GREEN":
-        stop_loss = n1_low
-        risk = spike_close - stop_loss
-    else:
-        stop_loss = n1_high
-        risk = stop_loss - spike_close
-
-    if risk <= 0:
-        return "", None, None, None, None
-
-    if candle_color == "GREEN":
-        t2 = spike_close + risk * 2
-        t3 = spike_close + risk * 3
-        t4 = spike_close + risk * 4
-    else:
-        t2 = spike_close - risk * 2
-        t3 = spike_close - risk * 3
-        t4 = spike_close - risk * 4
-
-    lines = (
-        f"\n<b>Suggested Levels (Risk:Reward basis):</b>\n"
-        f"Stop-Loss (N+1 extreme): {stop_loss:.8f}\n"
-        f"Target 2:1 → {t2:.8f}\n"
-        f"Target 3:1 → {t3:.8f}\n"
-        f"Target 4:1 → {t4:.8f}\n"
-    )
-
-    atr_pct = None
-    try:
-        atr_abs, atr_pct = calculate_atr(df, period=14)
-        if atr_pct is not None:
-            target_2r_pct = abs(t2 - spike_close) / spike_close * 100
-            est_candles, est_minutes = estimate_candles_to_target(atr_pct, target_2r_pct)
-            if est_candles is not None:
-                speed_label = (
-                    "FAST" if est_candles <= 2 else
-                    ("MEDIUM" if est_candles <= 5 else "SLOW")
-                )
-                lines += (
-                    f"\n<b>📊 Volatility Check:</b>\n"
-                    f"Typical 15-min move (ATR): {atr_pct}%\n"
-                    f"Estimated candles to reach 2:1 target: "
-                    f"~{est_candles} candles (~{est_minutes} min) — {speed_label}\n"
-                )
-    except Exception as e:
-        print(f"  [backtest_tracker] ATR calculation error: {e}")
-
-    return lines, atr_pct, t2, t3, t4
-
-
-def _send_n1_update(row, df, spike_time, spike_close, candle_color, dry_run=False):
-    """
-    Spike ke turant baad wali (N+1) candle bante hi ek chhota, turant
-    update bhejta hai — sirf STRONG bot pe. Yeh poore confirmation
-    (N+2) ka wait nahi karta, isliye jaldi milta hai.
-
-    Return: True agar bheja gaya (ya bhejne ki koshish hui), False agar
-    N+1 candle abhi tak data mein nahi aayi (matlab abhi wait karo).
-    """
-    target_n1 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 1)
-    found_n1, row_n1 = _find_closest_row(df, target_n1)
-
-    if not found_n1:
-        return False  # abhi itna time nahi guzra
-
-    n1_close = float(row_n1["Close"])
-    pct_move = round((n1_close - spike_close) / spike_close * 100, 2)
-    n1_shape_label = _shape_label(
-        row_n1["Open"], float(row_n1["High"]), float(row_n1["Low"]), row_n1["Close"]
-    )
-
-    direction_label = "UP (long)" if candle_color == "GREEN" else "DOWN (short)"
-
-    msg = (
-        f"⏱️ <b>N+1 UPDATE — {row['Pair']}</b>\n\n"
-        f"<b>Original Spike:</b>\n"
-        f"Spike Time (IST): {_to_ist_str(row['Spike_Time_UTC'])}\n"
-        f"Spike Direction: {direction_label}\n"
-        f"Spike Close: {spike_close}\n"
-        f"Candle Shape (at spike): {row.get('Candle_Shape', 'N/A')}\n"
-        f"Price Position (at spike): {row.get('Price_Position', 'N/A')}\n\n"
-        f"<b>N+1 Candle (15 min baad):</b>\n"
-        f"Time (IST): {_to_ist_str(str(row_n1['Time']))}\n"
-        f"Close: {n1_close}\n"
-        f"Shape: {n1_shape_label}\n"
-        f"Move so far (since spike): {pct_move:+.2f}%\n\n"
-        f"(Poora confirmation N+2 candle ke baad milega — yeh sirf ek turant update hai)"
-    )
-
-    if dry_run:
-        print(f"  [DRY_RUN] N+1 Update Telegram (strong bot): {msg}")
-        return True
-
-    try:
-        send_strong_telegram_message(msg)
-    except Exception as e:
-        print(f"  [backtest_tracker] N+1 update Telegram error: {e}")
-
-    return True
 
 
 # ============================================
 # PUBLIC: add_pending — naya spike track karna shuru karo
 # ============================================
-
 def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
                  price_position="UNKNOWN", rvol_20=0.0,
                  trend_type="UNKNOWN", trend_detail="", candle_shape="UNKNOWN",
                  sr_level_price=None, sr_touch_count=0):
+    """
+    Naya spike pending mein add karta hai — lekin pehle COOLDOWN check
+    hota hai. Agar pair already pending mein hai, skip kar deta hai.
+    """
     ws = _get_pending_worksheet()
+
+    # ---- COOLDOWN CHECK (v5 NAYA) ----
+    existing_records = ws.get_all_records()
+    if _is_pair_already_pending(existing_records, pair):
+        print(f"  [cooldown] {pair} already pending mein hai — naya signal skip kiya.")
+        return
+
     ws.append_row([
         pair,
         trigger_type,
@@ -426,20 +275,18 @@ def add_pending(pair, trigger_type, candle_color, spike_time, spike_close,
         float(spike_close),
         price_position,
         round(float(rvol_20), 2),
-        "PENDING",   # Confirmation_Status shuru mein hamesha PENDING
+        "PENDING",
         trend_type,
         trend_detail,
         candle_shape,
         sr_level_price if sr_level_price is not None else "",
         sr_touch_count,
-        "NO",   # N1_Alert_Sent — shuru mein hamesha NO, N+1 candle aate hi update hoga
-    ], table_range="A1")
+    ])
 
 
 # ============================================
 # PUBLIC: resolve_pending — har run ki shuruaat mein call karo
 # ============================================
-
 def resolve_pending(dry_run=False):
     pending_ws = _get_pending_worksheet()
     records = pending_ws.get_all_records()
@@ -473,22 +320,12 @@ def resolve_pending(dry_run=False):
         candle_color = row["Candle_Color"]
         rvol_20 = float(row.get("RVOL_20", 0) or 0)
         confirmation_status = row.get("Confirmation_Status", "PENDING")
-
-        # N1/N2 shape carry-forward ke liye — agar is run mein resolve na ho
-        # payein to bhi purani value (agar pehle se set hai) bachi rahe
         n1_shape = row.get("N1_Candle_Shape", "")
         n2_shape = row.get("N2_Candle_Shape", "")
 
-        # ATR/Target values — sirf reporting/Sheet ke liye, resolved row mein jayenge
-        atr_pct_value = row.get("ATR_Pct", "")
-        target_2r_value = row.get("Target_2R", "")
-        target_3r_value = row.get("Target_3R", "")
-        target_4r_value = row.get("Target_4R", "")
-
-        # Bahut purana ho gaya (pair delist ho gaya ho sakta hai, data-gap) -> discard
+        # Stale discard
         if now_utc - spike_time > timedelta(hours=MAX_AGE_HOURS):
-            print(f"  [backtest_tracker] {pair} @ {row['Spike_Time_UTC']} stale ho gaya "
-                  f"(>{MAX_AGE_HOURS}h), discard.")
+            print(f"  [backtest_tracker] {pair} @ {row['Spike_Time_UTC']} stale, discard.")
             discarded_count += 1
             continue
 
@@ -497,73 +334,32 @@ def resolve_pending(dry_run=False):
             still_pending.append(row)
             continue
 
-        # ---- N+1 UPDATE (strong-bot only) — spike DOMINANCE thi AUR kisi
-        # S/R level pe relevant thi, to N+1 candle bante hi (poore
-        # confirmation ka wait kiye bina) ek turant update bhejo strong
-        # bot pe — taaki jaldi pata chale spike ke turant baad kya hua. ----
-        n1_alert_sent = str(row.get("N1_Alert_Sent", "NO")).upper()
-        if n1_alert_sent != "YES":
-            original_shape = str(row.get("Candle_Shape", ""))
-            original_position = row.get("Price_Position", "UNKNOWN")
-
-            qualifies_for_n1_alert = (
-                original_shape.startswith("DOMINANCE")
-                and original_position in STRONG_BOT_ALLOWED_POSITIONS
-            )
-
-            if qualifies_for_n1_alert:
-                sent = _send_n1_update(
-                    row, df, spike_time, spike_close, candle_color, dry_run=dry_run
-                )
-                if sent:
-                    row["N1_Alert_Sent"] = "YES"
-            else:
-                # Criteria hi match nahi karti — dobara har run mein check
-                # na karna pade, isliye seedha "YES" (matlab "N/A, skip")
-                # maar do taaki flag ban jaaye.
-                row["N1_Alert_Sent"] = "YES"
-
-        # ---- CONFIRMATION-CANDLE CHECK (agar abhi tak nahi hua) ----
+        # ---- CONFIRMATION-CANDLE CHECK ----
         if confirmation_status == "PENDING":
             confirmation_result = _check_breakout_confirmation(df, spike_time, candle_color)
             if confirmation_result is not None:
                 new_status = confirmation_result["status"]
                 n1_shape = confirmation_result["n1_shape"]
                 n2_shape = confirmation_result["n2_shape"]
-                n1_high = confirmation_result["n1_high"]
-                n1_low = confirmation_result["n1_low"]
 
                 confirmation_status = new_status
                 row["Confirmation_Status"] = new_status
                 row["N1_Candle_Shape"] = n1_shape
                 row["N2_Candle_Shape"] = n2_shape
 
-                # ---- TARGET + ATR (sirf CONFIRMED_CONTINUATION ke liye) ----
-                target_lines = ""
-                if new_status == "CONFIRMED_CONTINUATION":
-                    target_lines, atr_pct_value, target_2r_value, target_3r_value, target_4r_value = (
-                        _build_target_and_atr_block(df, spike_close, candle_color, n1_high, n1_low)
-                    )
-                    row["ATR_Pct"] = atr_pct_value if atr_pct_value is not None else ""
-                    row["Target_2R"] = target_2r_value if target_2r_value is not None else ""
-                    row["Target_3R"] = target_3r_value if target_3r_value is not None else ""
-                    row["Target_4R"] = target_4r_value if target_4r_value is not None else ""
-
-                # Sirf strong-signal spikes (RVOL_20 >= threshold) ko hi
-                # confirmation Telegram alert bhejo
                 if rvol_20 >= CONFIRMATION_ALERT_RVOL_THRESHOLD:
                     confirmation_sent_count += 1
-                    emoji = {"CONFIRMED_CONTINUATION": "✅", "FAILED_BREAKOUT": "❌",
-                             "STILL_UNDECIDED": "⚪"}.get(new_status, "")
-
+                    emoji = {
+                        "CONFIRMED_CONTINUATION": "✅",
+                        "FAILED_BREAKOUT": "❌",
+                        "STILL_UNDECIDED": "⚪",
+                    }.get(new_status, "")
                     status_note = {
                         "CONFIRMED_CONTINUATION": "Momentum genuinely continue ho raha hai — jis direction mein spike hui thi, price usi taraf aage badh raha hai.",
                         "FAILED_BREAKOUT": "Ye false breakout tha — price ulti direction mein chala gaya. Trade avoid karna sahi hota.",
                         "STILL_UNDECIDED": "Abhi clear nahi hai — price kisi bhi taraf decisively nahi gaya. Aur wait karo.",
                     }.get(new_status, "")
 
-                    # Confirmation-candle (N+2) ka current price bhi nikaal lo,
-                    # taaki abhi tak kitna % move hua wo bhi dikha sakein
                     target_n2 = spike_time + timedelta(minutes=RESOLUTION_MINUTES * 2)
                     found_n2, row_n2 = _find_closest_row(df, target_n2)
                     pct_move_so_far = ""
@@ -589,8 +385,7 @@ def resolve_pending(dry_run=False):
                         f"Status: <b>{new_status}</b>\n"
                         f"Indecision Candle (N+1) Shape: {n1_shape}\n"
                         f"Confirmation Candle (N+2) Shape: {n2_shape}\n"
-                        f"Move so far (since spike): {pct_move_so_far}\n"
-                        f"{target_lines}\n"
+                        f"Move so far (since spike): {pct_move_so_far}\n\n"
                         f"{status_note}\n\n"
                         f"(Indecision candle ke High/Low ke against 2nd candle ka result)"
                     )
@@ -599,30 +394,24 @@ def resolve_pending(dry_run=False):
                         print(f"  [DRY_RUN] Confirmation Telegram: {msg}")
                     else:
                         try:
-                            send_telegram_message(msg)   # purana bot — sab confirmation updates yahan
+                            send_telegram_message(msg)
                         except Exception as e:
                             print(f"  [backtest_tracker] Confirmation Telegram error: {e}")
 
-                        # Agar original spike DOMINANCE shape thi AUR kisi
-                        # S/R level ke relevant thi, to confirmation update
-                        # (target+ATR sahit) bhi strong bot pe bhejo — taaki
-                        # strong-bot channel pe poora lifecycle dikhe.
+                        # Strong bot pe bhi bhejo agar original spike qualify karti thi
                         original_shape = str(row.get("Candle_Shape", ""))
                         original_position = row.get("Price_Position", "UNKNOWN")
-                        is_strong_shape = original_shape.startswith("DOMINANCE")
-                        is_level_relevant = original_position in STRONG_BOT_ALLOWED_POSITIONS
-                        if is_strong_shape and is_level_relevant:
+                        if (original_shape.startswith("DOMINANCE")
+                                and original_position in STRONG_BOT_ALLOWED_POSITIONS):
                             try:
                                 send_strong_telegram_message(msg)
                             except Exception as e:
-                                print(f"  [backtest_tracker] Strong-bot confirmation Telegram error: {e}")
+                                print(f"  [backtest_tracker] Strong-bot confirmation error: {e}")
 
-        # Poore max_horizon (75 min) tak ki candle chahiye tabhi fully resolve hoga
+        # Max horizon tak ki candle chahiye tabhi fully resolve hoga
         max_target_time = spike_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon)
         found_max, _ = _find_closest_candle(df, max_target_time)
-
         if not found_max:
-            # Abhi itna time nahi guzra, agle run mein try karenge
             still_pending.append(row)
             continue
 
@@ -658,25 +447,20 @@ def resolve_pending(dry_run=False):
         result_row.append(row.get("SR_Touch_Count", 0))
         result_row.append(n1_shape)
         result_row.append(n2_shape)
-        result_row.append(atr_pct_value)
-        result_row.append(target_2r_value)
-        result_row.append(target_3r_value)
-        result_row.append(target_4r_value)
 
-        # Fully resolved — result likh do
         if dry_run:
             print(f"  [backtest_tracker][DRY_RUN] RESOLVED: {result_row}")
         else:
             try:
-                _get_results_worksheet().append_row(result_row, table_range="A1")
+                _get_results_worksheet().append_row(result_row)
             except Exception as e:
                 print(f"  [backtest_tracker] Results likhne mein error: {e}")
-                still_pending.append(row)  # fail hua to pending mein wapas rakho
+                still_pending.append(row)
                 continue
 
         resolved_count += 1
 
-    # Pending_Spikes tab ko naye (updated) list se overwrite karo
+    # Pending_Spikes_V2 tab overwrite karo
     if not dry_run:
         try:
             clean_rows = [[
@@ -690,16 +474,15 @@ def resolve_pending(dry_run=False):
                 r.get("Candle_Shape", "UNKNOWN"),
                 r.get("SR_Level_Price", ""),
                 r.get("SR_Touch_Count", 0),
-                r.get("N1_Alert_Sent", "NO"),
             ] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)
         except Exception as e:
-            print(f"  [backtest_tracker] Pending_Spikes update karne mein error: {e}")
+            print(f"  [backtest_tracker] Pending_Spikes_V2 update error: {e}")
     else:
-        print(f"  [backtest_tracker][DRY_RUN] Pending list update hoti: "
-              f"{len(still_pending)} still pending.")
+        print(f"  [backtest_tracker][DRY_RUN] Still pending: {len(still_pending)}")
 
     print(f"  [backtest_tracker] Resolved: {resolved_count} | "
-          f"Still pending: {len(still_pending)} | Discarded (stale): {discarded_count} | "
+          f"Still pending: {len(still_pending)} | "
+          f"Discarded (stale): {discarded_count} | "
           f"Confirmation alerts sent: {confirmation_sent_count}")

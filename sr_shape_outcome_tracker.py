@@ -87,6 +87,7 @@ from google.oauth2.service_account import Credentials
 from data.candles import get_candles
 from support_resistance import get_support_resistance, classify_price_position
 from candle_shape import classify_candle_shape
+from notifications.telegram_bot import send_confusion_telegram_message  # NAYA — teesra, alag bot
 import config
 
 # ============================================
@@ -207,6 +208,14 @@ def _to_utc_dt(value):
     if dt.tzinfo is None:
         dt = dt.tz_localize("UTC")
     return dt.to_pydatetime()
+
+
+def _to_ist_str(value):
+    dt = pd.to_datetime(value)
+    if dt.tzinfo is None:
+        dt = dt.tz_localize("UTC")
+    ist_dt = dt + pd.Timedelta(hours=5, minutes=30)
+    return ist_dt.strftime("%Y-%m-%d %H:%M:%S") + " IST"
 
 
 def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES):
@@ -364,7 +373,77 @@ def process_candle(pair, df, dry_run=False):
           f"({shape_ctx['strength']}, body={shape_ctx['body_pct']}%) | "
           f"{setup_direction} entry={entry_price} SL={stop_loss} "
           f"({sl_distance_pct}% away)")
+
+    # ---- NAYA: CONFUSION bot ko Telegram alert (naya setup qualify hua) ----
+    setup_msg = _build_setup_message(
+        pair, candle_time, price_position, sr_level_price, sr_touch_count,
+        shape_ctx, setup_direction, entry_price, stop_loss, sl_distance_pct,
+    )
+    if dry_run:
+        print(f"  [sr_shape_tracker][DRY_RUN] Confusion Telegram (setup):\n{setup_msg}\n")
+    else:
+        try:
+            send_confusion_telegram_message(setup_msg)
+        except Exception as e:
+            print(f"  [sr_shape_tracker] Confusion Telegram (setup) error: {e}")
+
     return True
+
+
+# ============================================
+# TELEGRAM MESSAGE BUILDERS (Confusion bot)
+# ============================================
+def _build_setup_message(pair, candle_time, price_position, sr_level_price,
+                          sr_touch_count, shape_ctx, setup_direction,
+                          entry_price, stop_loss, sl_distance_pct):
+    """Naya CONFUSION setup qualify hote hi (pending mein add hote hi) bhejne wala message."""
+    direction_emoji = "🟢" if setup_direction == "LONG" else "🔴"
+    return (
+        f"🌀 <b>CONFUSION SETUP DETECTED</b>\n\n"
+        f"<b>Pair:</b> {pair}\n"
+        f"<b>Candle Time (IST):</b> {_to_ist_str(candle_time)}\n"
+        f"<b>Price Position:</b> {price_position} (Level: {sr_level_price}, tested {sr_touch_count}x pehle)\n"
+        f"<b>Candle Shape:</b> CONFUSION ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)\n\n"
+        f"{direction_emoji} <b>Setup Direction:</b> {setup_direction}\n"
+        f"<b>Entry:</b> {entry_price}\n"
+        f"<b>Stop Loss:</b> {stop_loss} ({sl_distance_pct}% away)\n\n"
+        f"Ye sirf data-collection/backtest ke liye hai, trade instruction nahi — "
+        f"khud verify karke decide karo."
+    )
+
+
+def _build_resolved_message(pair, candle_time, price_position, setup_direction,
+                             entry_price, stop_loss, outcome, pct_changes_by_horizon):
+    """120-min window fully resolve hone par (final outcome ke saath) bhejne wala message."""
+    sl_final_hit = outcome["sl_hit_by"][max(HORIZONS_MINUTES)]
+    result_emoji = "❌" if sl_final_hit else "✅"
+
+    targets_lines = "\n".join(
+        f"  {_rr_label(rr)}: {'YES ✅' if outcome['target_hit'][rr] else 'NO'}"
+        for rr in TARGET_RR
+    )
+    sl_lines = "\n".join(
+        f"  {m}min: {'YES ❌' if outcome['sl_hit_by'][m] else 'NO'}"
+        for m in HORIZONS_MINUTES
+    )
+    horizon_lines = "\n".join(
+        f"  {m}min: {pct_changes_by_horizon.get(m, ''):+.2f}%" if pct_changes_by_horizon.get(m, "") != "" else f"  {m}min: N/A"
+        for m in HORIZONS_MINUTES
+    )
+
+    return (
+        f"{result_emoji} <b>CONFUSION OUTCOME RESOLVED</b>\n\n"
+        f"<b>Pair:</b> {pair}\n"
+        f"<b>Candle Time (IST):</b> {_to_ist_str(candle_time)}\n"
+        f"<b>Price Position:</b> {price_position}\n"
+        f"<b>Setup:</b> {setup_direction} | Entry: {entry_price} | SL: {stop_loss}\n\n"
+        f"<b>Price % change by horizon:</b>\n{horizon_lines}\n\n"
+        f"<b>SL Hit by horizon:</b>\n{sl_lines}\n\n"
+        f"<b>Target Hit (R-multiples):</b>\n{targets_lines}\n\n"
+        f"<b>Max Favorable:</b> {outcome['max_favorable_pct']}% | "
+        f"<b>Max Adverse:</b> {outcome['max_adverse_pct']}%\n\n"
+        f"(Sirf record/data — trade instruction nahi.)"
+    )
 
 
 # ============================================
@@ -598,6 +677,20 @@ def resolve_pending(dry_run=False):
                 result_row.append("YES" if outcome["sl_hit_by"][m] else "NO")
             for rr in TARGET_RR:
                 result_row.append("YES" if outcome["target_hit"][rr] else "NO")
+
+            # ---- NAYA: CONFUSION bot ko Telegram alert (final outcome resolve hua) ----
+            pct_by_horizon = dict(zip(HORIZONS_MINUTES, pct_changes))
+            resolved_msg = _build_resolved_message(
+                pair, candle_time, row.get("Price_Position", "UNKNOWN"),
+                setup_direction, entry_price, stop_loss, outcome, pct_by_horizon,
+            )
+            if dry_run:
+                print(f"  [sr_shape_tracker][DRY_RUN] Confusion Telegram (resolved):\n{resolved_msg}\n")
+            else:
+                try:
+                    send_confusion_telegram_message(resolved_msg)
+                except Exception as e:
+                    print(f"  [sr_shape_tracker] Confusion Telegram (resolved) error: {e}")
         else:
             # Setup direction/SL missing (theoretically nahi hona chahiye,
             # safety fallback) — sab kuch blank/NO chhod do.

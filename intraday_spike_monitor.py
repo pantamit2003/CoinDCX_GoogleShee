@@ -57,6 +57,17 @@ NAYA — PATTERN-BACKTEST DATA COLLECTION (standalone, alag module):
     backtest_tracker.py se independent (alag Sheet tabs: Pattern_Pending,
     Pattern_Backtest_Data).
 
+NAYA — SR-SHAPE OUTCOME TRACKER HOOK (is version mein add hua):
+    sr_shape_outcome_tracker.py bhi ek ALAG, standalone, RVOL-trigger se
+    INDEPENDENT module hai — har candle ko (RVOL spike ho ya na ho) check
+    karta hai: valid S/R (5+ touch) ke paas CONFUSION-shape candle bani ho
+    to LONG/SHORT setup bana ke Google Sheet mein data collect karta hai
+    (SR_Shape_Pending / SR_Shape_Backtest_Data tabs). Isliye iske do calls
+    RVOL trigger_type check ke BAHAR/pehle hain — trigger na bhi mile,
+    tab bhi ye apna independent condition check karega.
+    Koi bhi existing RVOL/S/R/Trendline/Telegram/backtest_tracker/
+    pattern_backtest logic yahan touch nahi hui hai.
+
 CHALANE KA TARIKA (local testing ke liye bhi):
     python intraday_spike_monitor.py
 """
@@ -65,7 +76,6 @@ from datetime import datetime, timezone, timedelta
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-
 from data.candles import get_candles
 from exchange.coindcx import get_active_pairs
 from notifications.telegram_bot import send_telegram_message, send_strong_telegram_message
@@ -77,6 +87,7 @@ from trendline import get_trendline_context
 from candle_shape import classify_candle_shape
 import backtest_tracker
 import pattern_backtest
+import sr_shape_outcome_tracker as sr_shape_tracker   # NAYA — standalone, RVOL-independent
 import config
 
 # ============================================
@@ -249,6 +260,7 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
         "LONG_ONLY": "Sirf medium-term (1 din) baseline confirm kar raha hai — short-term abhi threshold cross nahi kiya. Dheere-dheere build ho raha volume ho sakta hai.",
     }.get(trigger_type, "")
+
     position_note = {
         "BREAKOUT_ABOVE_RESISTANCE": "🟢 Resistance todke upar nikla — genuine breakout ho sakta hai.",
         "BREAKDOWN_BELOW_SUPPORT": "🔴 Support todke neeche gaya — genuine breakdown ho sakta hai.",
@@ -256,12 +268,15 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "NEAR_SUPPORT": "⚠️ Support ke paas hai — bounce ya breakdown, dono possible.",
         "MID_RANGE": "Kisi bhi major level ke paas nahi — range ke beech mein.",
     }.get(price_position_label, "")
+
     sr_line = f"<b>Price Position:</b> {price_position_label}"
     if sr_level_price is not None:
         sr_line += f" (Level: {sr_level_price}, tested {sr_touch_count}x pehle)"
+
     trend_line = f"<b>Trend:</b> {trend_type}"
     if trend_detail:
         trend_line += f" ({trend_detail})"
+
     consolidation_line = ""
     if pre_breakout_consolidation is not None:
         n = pre_breakout_consolidation
@@ -272,6 +287,7 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         else:
             note = "WEAK — seedha breakout hua bina consolidation ke, fake hone ka risk zyada"
         consolidation_line = f"\n<b>Pre-Breakout Consolidation:</b> {n} candles ({n * 15} min) — {note}"
+
     liquidity_line = ""
     if liquidity_zone is not None and liquidity_zone.get("zone_price") is not None:
         liquidity_line = (
@@ -279,6 +295,7 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
             f"({liquidity_zone['distance_pct']}% door, tested {liquidity_zone['touch_count']}x pehle) "
             f"— price ab bhi wahan tak khinch sakta hai"
         )
+
     return (
         f"🚨 <b>INTRADAY VOLUME SPIKE — {trigger_type}</b>\n\n"
         f"<b>Pair:</b> {pair}\n"
@@ -303,9 +320,11 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
 # ============================================
 def run_one_scan():
     global _pending_pairs_cache
+
     print(f"\n{'=' * 60}")
     print(f"SCAN STARTED: {datetime.now()}")
     print('=' * 60)
+
     _pending_pairs_cache = None
 
     try:
@@ -317,6 +336,14 @@ def run_one_scan():
         pattern_backtest.resolve_pending_patterns(dry_run=DRY_RUN)
     except Exception as e:
         print(f"  [pattern_backtest] resolve_pending_patterns mein error: {e}")
+
+    # ---- NAYA: sr_shape_tracker bhi apne pending signals resolve karega ----
+    # Ye poori tarah RVOL-trigger se independent hai, isliye scan shuru mein
+    # ek baar, baaki resolve_pending() calls ke saath hi chala diya.
+    try:
+        sr_shape_tracker.resolve_pending(dry_run=DRY_RUN)
+    except Exception as e:
+        print(f"  [sr_shape_tracker] resolve_pending mein error: {e}")
 
     _load_pending_pairs_cache()
 
@@ -332,6 +359,7 @@ def run_one_scan():
             pairs = pairs[:MAX_PAIRS_TO_SCAN]
 
     print(f"Scanning {len(pairs)} pairs...")
+
     counts = {"SHORT_ONLY": 0, "LONG_ONLY": 0, "BOTH": 0}
     telegram_sent_count = 0
     strong_telegram_sent_count = 0
@@ -343,8 +371,19 @@ def run_one_scan():
             if df.empty or len(df) < LOOKBACK_LONG + 1:
                 continue
 
+            # ---- NAYA: sr_shape_tracker — RVOL trigger se BAHAR/pehle ----
+            # Yeh apni khud ki independent condition check karta hai
+            # (valid S/R + CONFUSION shape) — RVOL spike mile ya na mile,
+            # dono cases mein chalega. Isliye trigger_type nikalne se
+            # pehle hi is candle ko process karwa dete hain.
+            try:
+                sr_shape_tracker.process_candle(pair, df, dry_run=DRY_RUN)
+            except Exception as e:
+                print(f"  [sr_shape_tracker] {pair} process_candle error: {e}")
+
             result = get_intraday_rvol(df, lookback_periods=[LOOKBACK_SHORT, LOOKBACK_LONG])
             last_row = result.iloc[-1]
+
             rvol_20 = last_row[f"RVOL_{LOOKBACK_SHORT}"]
             rvol_96 = last_row[f"RVOL_{LOOKBACK_LONG}"]
 
@@ -447,6 +486,7 @@ def run_one_scan():
                       f"Trend={trend_type} | Shape={candle_shape_label} | Time={candle_time}")
 
                 candle_time_ist = to_ist(candle_time)
+
                 message = build_alert_message(
                     pair, trigger_type, candle_time_ist, close, volume,
                     rvol_20, rvol_96, price_position, sr_level_price, sr_touch_count,
@@ -461,6 +501,7 @@ def run_one_scan():
                 # Agar price_position MID_RANGE hai (matlab koi valid 5+ touch level nahi mila),
                 # to S/R condition automatically fail hogi (sr_touch_count = 0 hoga)
                 sr_is_valid = sr_touch_count >= MIN_SR_TOUCHES
+
                 if rvol_20 >= RVOL_20_ALERT_THRESHOLD:
                     # Sirf tabhi Telegram bhejo jab:
                     # 1. MID_RANGE hai (S/R relevant nahi, volume spike pe alert dena theek hai)
@@ -469,12 +510,14 @@ def run_one_scan():
                         price_position == "MID_RANGE"
                         or sr_is_valid
                     )
+
                     if should_send_main:
                         telegram_sent_count += 1
                         if DRY_RUN:
                             print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
                         else:
                             send_telegram_message(message)
+
                             # Strong bot: DOMINANCE + valid S/R level (5+ touches) + allowed position
                             is_strong_shape = shape_ctx["shape"] == "DOMINANCE"
                             is_level_relevant = price_position in STRONG_BOT_ALLOWED_POSITIONS
@@ -494,6 +537,7 @@ def run_one_scan():
                 detected_at_ist = (
                     datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
                 ).strftime("%Y-%m-%d %H:%M:%S")
+
                 log_to_sheet([
                     detected_at_ist,
                     str(candle_time),
@@ -552,6 +596,7 @@ def run_one_scan():
                         print(f"  [pattern_backtest] add_pending_pattern mein error: {e}")
 
             time.sleep(SLEEP_BETWEEN_PAIRS)
+
         except Exception as e:
             print(f"  {pair} pe error aaya, skip kar rahe hain: {e}")
             continue
@@ -576,5 +621,6 @@ if __name__ == "__main__":
     print(f"Telegram sirf RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} pe jayega")
     print(f"S/R minimum touches: {MIN_SR_TOUCHES} (weak levels ignore honge)")
     print(f"Support/Resistance: ON | Trendline: ON | Candle Shape: ON")
-    print(f"Cooldown: ON (Pending_Spikes_V2 se) | Dual Telegram: ON | Pattern-Backtest: ON\n")
+    print(f"Cooldown: ON (Pending_Spikes_V2 se) | Dual Telegram: ON | Pattern-Backtest: ON")
+    print(f"SR-Shape Outcome Tracker: ON (RVOL-independent, alag Sheet tabs)\n")
     run_one_scan()

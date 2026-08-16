@@ -4,7 +4,6 @@ sr_shape_outcome_tracker.py
 NAYA STANDALONE MODULE — RVOL/spike-trigger se bilkul INDEPENDENT.
 
 YEH FLOWCHART IMPLEMENT KARTA HAI:
-
     15-min candle
         |
     Kya price valid Support/Resistance ke paas hai? (touch_count >= MIN_SR_TOUCHES)
@@ -45,7 +44,7 @@ KYUN ALAG MODULE:
       Trendline / Telegram / Consolidation logic / candle-shape
       classification / MIN_SR_TOUCHES / existing S/R detection ko
       BILKUL touch nahi kiya. Sirf naye, alag Google Sheet tabs use
-      hote hain: SR_Shape_Pending aur SR_Shape_Backtest_Data.
+      hote hain: Confusion_Pending aur Confusion_Backtest_Data.
 
 KAISE HOOK KARNA HAI (OPTIONAL):
     import sr_shape_outcome_tracker as sr_shape_tracker
@@ -117,8 +116,10 @@ def _rr_label(rr):
     return (f"{rr:g}R")
 
 
-PENDING_WORKSHEET_NAME = "SR_Shape_Pending"
-RESULTS_WORKSHEET_NAME = "SR_Shape_Backtest_Data"
+# ---- NAYA: worksheet names "Confusion" naming ke saath (sirf naam change,
+# baaki poori logic bilkul same hai) ----
+PENDING_WORKSHEET_NAME = "Confusion_Pending"
+RESULTS_WORKSHEET_NAME = "Confusion_Backtest_Data"
 
 # price_position labels jo "Support" side ka concept represent karte hain
 # (LONG setup) vs "Resistance" side (SHORT setup).
@@ -264,6 +265,7 @@ def process_candle(pair, df, dry_run=False):
         )
         resistance_levels = [r for r in resistance_raw if r[1] >= MIN_SR_TOUCHES]
         support_levels = [s for s in support_raw if s[1] >= MIN_SR_TOUCHES]
+
         sr_result = classify_price_position(
             close, prev_close, resistance_levels, support_levels,
             proximity_pct=SR_PROXIMITY_PCT,
@@ -385,6 +387,7 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
         "max_adverse_pct": float ya None
     """
     max_horizon_min = max(HORIZONS_MINUTES)
+
     work_df = df.copy()
     time_col = work_df["Time"]
     if time_col.dt.tz is None:
@@ -412,6 +415,7 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
         risk = entry_price - stop_loss
     else:
         risk = stop_loss - entry_price
+
     targets = {rr: (entry_price + rr * risk) if is_long else (entry_price - rr * risk)
                for rr in TARGET_RR}
 
@@ -461,10 +465,10 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
             elif targets_breached_this_candle:
                 for rr in targets_breached_this_candle:
                     target_hit[rr] = True
+
         # agar sl_hit_flag pehle hi True ho chuka hai (pichli candle mein),
         # to is candle ke targets count nahi honge — trade already
         # stopped-out maana jaata hai.
-
         if sl_hit_flag and sl_hit_time is not None:
             for m in HORIZONS_MINUTES:
                 if sl_hit_time <= candle_time + timedelta(minutes=m):
@@ -492,6 +496,7 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
 def resolve_pending(dry_run=False):
     pending_ws = _get_pending_worksheet()
     records = pending_ws.get_all_records()
+
     if not records:
         print("  [sr_shape_tracker] Koi pending candle nahi hai.")
         return

@@ -14,13 +14,16 @@ KYA KARTA HAI:
   hai (trendline.py module se) — trend direction, touch points, break/retest
 - Khud spike-candle ka shape bhi classify karta hai
   (candle_shape.py module se) — DOMINANCE / REJECTION / CONFUSION
+
 BACKTESTING KE LIYE — 3 INDEPENDENT CONDITIONS:
     1. SHORT_ONLY — sirf RVOL_20 >= threshold pass hua, RVOL_96 nahi
     2. LONG_ONLY  — sirf RVOL_96 >= threshold pass hua, RVOL_20 nahi
     3. BOTH       — dono RVOL_20 aur RVOL_96 pass hue (sabse strict)
+
 Har category ka Sheet mein record hota hai (Trigger_Type column ke saath) —
 lekin TELEGRAM sirf tabhi jaata hai jab RVOL_20 >= RVOL_20_ALERT_THRESHOLD
 ho.
+
 NAYA — DUAL TELEGRAM BOT:
     Purana bot (send_telegram_message) — SAARE qualifying signals yahan
     jaate hain, jaisa pehle hota tha.
@@ -28,6 +31,7 @@ NAYA — DUAL TELEGRAM BOT:
     AUR kisi na kisi S/R level ke relevant (BREAKOUT_ABOVE_RESISTANCE,
     BREAKDOWN_BELOW_SUPPORT, NEAR_RESISTANCE, NEAR_SUPPORT) signals yahan
     bhi jaate hain — sirf MID_RANGE wale skip hote hain.
+
 NAYA — COOLDOWN LOGIC (v2):
     Agar koi pair already Pending_Spikes_V2 mein PENDING hai (matlab
     pichla signal abhi resolve nahi hua, ~60-75 min effective cooldown),
@@ -36,6 +40,13 @@ NAYA — COOLDOWN LOGIC (v2):
     - Sheet mein log nahi hoga
     - backtest mein nahi jayega
     Ye same-event-multiple-count distortion solve karta hai.
+
+NAYA — S/R MINIMUM TOUCH FILTER:
+    Sirf wahi S/R levels valid maane jayenge jinka touch_count >= MIN_SR_TOUCHES
+    (default: 5) ho. Weak levels (1-4 touches) ko completely ignore kiya
+    jayega — classification, consolidation, liquidity zone, aur Telegram
+    alerts sabke liye.
+
 NAYA — PATTERN-BACKTEST DATA COLLECTION (standalone, alag module):
     Breakout/breakdown spikes ke liye ek ALAG data-collection pipeline
     bhi chalta hai (pattern_backtest.py) — Breakout → Dominance →
@@ -44,14 +55,17 @@ NAYA — PATTERN-BACKTEST DATA COLLECTION (standalone, alag module):
     sirf research ke liye raw data collect karta hai, poori tarah
     backtest_tracker.py se independent (alag Sheet tabs: Pattern_Pending,
     Pattern_Backtest_Data).
+
 CHALANE KA TARIKA (local testing ke liye bhi):
     python intraday_spike_monitor.py
 """
 import time
 from datetime import datetime, timezone, timedelta
+
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+
 from data.candles import get_candles
 from exchange.coindcx import get_active_pairs
 from notifications.telegram_bot import send_telegram_message, send_strong_telegram_message
@@ -64,6 +78,8 @@ from candle_shape import classify_candle_shape
 import backtest_tracker
 import pattern_backtest
 import config
+
+
 # ============================================
 # CONFIG — pehle inhe apni marzi se set karo
 # ============================================
@@ -71,25 +87,40 @@ DRY_RUN = False         # True = sirf console print, Telegram/Sheet pe kuch nahi
 RESOLUTION = "15"       # 15-min candles
 LOOKBACK_SHORT = 20     # ~5 hours ka baseline
 LOOKBACK_LONG = 96      # ~1 din ka baseline
-RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 kam se kam itna hona chahiye (Sheet-logging ke liye)
-RVOL_LONG_THRESHOLD = 6.0    # RVOL_96 kam se kam itna hona chahiye (Sheet-logging ke liye)
-RVOL_20_ALERT_THRESHOLD = 6.0   # Telegram alert SIRF tabhi jayega jab RVOL_20 isse zyada ho
+
+RVOL_SHORT_THRESHOLD = 5.0
+RVOL_LONG_THRESHOLD = 6.0
+RVOL_20_ALERT_THRESHOLD = 6.0
+
 SR_LOOKBACK = 50
 SR_CLUSTER_TOLERANCE_PCT = 0.5
 SR_PROXIMITY_PCT = 0.5
-CONSOLIDATION_BAND_PCT = 1.5     # pre-breakout consolidation ke liye tolerance band
-CONSOLIDATION_MAX_LOOKBACK = 20  # zyada se zyada kitni candles peeche dekhna hai
+
+# ---- NAYA: S/R minimum touch filter ----
+# Sirf wahi S/R levels valid maane jayenge jinka touch_count >= MIN_SR_TOUCHES ho.
+# 1-4 touches wale levels weak/coincidental ho sakte hain — ignore karo.
+# 5+ touches = level ne multiple baar market ka attention paya hai = reliable.
+MIN_SR_TOUCHES = 5
+
+CONSOLIDATION_BAND_PCT = 1.5
+CONSOLIDATION_MAX_LOOKBACK = 20
+
 TRENDLINE_LOOKBACK = 60
+
 MAX_PAIRS_TO_SCAN = 250
 SLEEP_BETWEEN_PAIRS = 0.3
+
 WORKSHEET_NAME = "Intraday_Spike_Alerts_V2"
+
 TEST_ONLY_PAIRS = []
+
 STRONG_BOT_ALLOWED_POSITIONS = (
     "BREAKOUT_ABOVE_RESISTANCE",
     "BREAKDOWN_BELOW_SUPPORT",
     "NEAR_RESISTANCE",
     "NEAR_SUPPORT",
 )
+
 SHEET_HEADER = [
     "Detected_At_IST", "Candle_Time_UTC", "Pair", "Trigger_Type",
     "Close", "Volume", "RVOL_20", "RVOL_96",
@@ -97,19 +128,15 @@ SHEET_HEADER = [
     "Trend_Type", "Trend_Detail", "Candle_Shape",
     "Pre_Breakout_Consolidation", "Next_Liquidity_Zone", "Next_Liquidity_Distance_Pct",
 ]
+
+
 # ============================================
 # COOLDOWN — pending pairs cache
 # ============================================
-# Har scan run ke start mein Pending_Spikes_V2 se ek baar fetch karke
-# ye set banate hain — taaki har pair ke liye alag-alag Sheet API call
-# na ho (efficient hai).
 _pending_pairs_cache = None
+
+
 def _load_pending_pairs_cache():
-    """
-    Pending_Spikes_V2 tab se saare PENDING pairs ek baar fetch karta hai.
-    Result ek set mein store hota hai — O(1) lookup ke liye.
-    Ye function sirf ek baar (run ke start mein) call hoga.
-    """
     global _pending_pairs_cache
     if _pending_pairs_cache is not None:
         return _pending_pairs_cache
@@ -124,16 +151,14 @@ def _load_pending_pairs_cache():
         print(f"  [cooldown] Pending pairs loaded: {len(_pending_pairs_cache)} pairs currently in cooldown.")
     except Exception as e:
         print(f"  [cooldown] Pending pairs fetch error (cooldown disabled this run): {e}")
-        _pending_pairs_cache = set()  # empty set — koi cooldown nahi, safe fallback
+        _pending_pairs_cache = set()
     return _pending_pairs_cache
+
+
 def _is_in_cooldown(pair):
-    """
-    Check karta hai ki ye pair abhi cooldown mein hai ya nahi.
-    Cooldown tab khatam hota hai jab pair ka signal resolve ho jata hai
-    (CONFIRMED_CONTINUATION / FAILED_BREAKOUT / STILL_UNDECIDED).
-    Effective cooldown ~60-75 min hota hai (N+1 + N+2 + resolve cycle).
-    """
     return pair in _load_pending_pairs_cache()
+
+
 # ============================================
 # TIME HELPERS
 # ============================================
@@ -143,6 +168,8 @@ def to_ist(utc_dt):
         dt = dt.tz_localize("UTC")
     ist_dt = dt + pd.Timedelta(hours=5, minutes=30)
     return ist_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 # ============================================
 # RVOL CALCULATION
 # ============================================
@@ -155,6 +182,8 @@ def get_intraday_rvol(df, lookback_periods):
         df[rvol_col] = df["Volume"] / df[avg_col]
         df.drop(columns=[avg_col], inplace=True)
     return df
+
+
 # ============================================
 # 3 INDEPENDENT CONDITIONS
 # ============================================
@@ -169,11 +198,15 @@ def classify_trigger_type(rvol_20, rvol_96):
         return "LONG_ONLY"
     else:
         return None
+
+
 # ============================================
 # GOOGLE SHEETS
 # ============================================
 _sheets_client = None
 _worksheet = None
+
+
 def _get_worksheet():
     global _sheets_client, _worksheet
     if _worksheet is not None:
@@ -193,6 +226,8 @@ def _get_worksheet():
         )
         _worksheet.append_row(SHEET_HEADER, table_range="A1")
     return _worksheet
+
+
 def log_to_sheet(row_values):
     if DRY_RUN:
         print(f"  [DRY_RUN] Sheet mein ye row jaati: {row_values}")
@@ -202,6 +237,8 @@ def log_to_sheet(row_values):
         ws.append_row(row_values, table_range="A1")
     except Exception as e:
         print(f"  Google Sheet mein likhne mein error: {e}")
+
+
 # ============================================
 # ALERT MESSAGE
 # ============================================
@@ -214,6 +251,7 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
         "LONG_ONLY": "Sirf medium-term (1 din) baseline confirm kar raha hai — short-term abhi threshold cross nahi kiya. Dheere-dheere build ho raha volume ho sakta hai.",
     }.get(trigger_type, "")
+
     position_note = {
         "BREAKOUT_ABOVE_RESISTANCE": "🟢 Resistance todke upar nikla — genuine breakout ho sakta hai.",
         "BREAKDOWN_BELOW_SUPPORT": "🔴 Support todke neeche gaya — genuine breakdown ho sakta hai.",
@@ -221,15 +259,15 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "NEAR_SUPPORT": "⚠️ Support ke paas hai — bounce ya breakdown, dono possible.",
         "MID_RANGE": "Kisi bhi major level ke paas nahi — range ke beech mein.",
     }.get(price_position_label, "")
+
     sr_line = f"<b>Price Position:</b> {price_position_label}"
     if sr_level_price is not None:
         sr_line += f" (Level: {sr_level_price}, tested {sr_touch_count}x pehle)"
+
     trend_line = f"<b>Trend:</b> {trend_type}"
     if trend_detail:
         trend_line += f" ({trend_detail})"
 
-    # ---- NAYA: pre-breakout consolidation line — sirf tabhi dikhega
-    # jab yeh feature applicable thi (breakout/breakdown spikes ke liye) ----
     consolidation_line = ""
     if pre_breakout_consolidation is not None:
         n = pre_breakout_consolidation
@@ -241,7 +279,6 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
             note = "WEAK — seedha breakout hua bina consolidation ke, fake hone ka risk zyada"
         consolidation_line = f"\n<b>Pre-Breakout Consolidation:</b> {n} candles ({n * 15} min) — {note}"
 
-    # ---- NAYA: next liquidity zone line — sirf breakout/breakdown ke liye ----
     liquidity_line = ""
     if liquidity_zone is not None and liquidity_zone.get("zone_price") is not None:
         liquidity_line = (
@@ -267,30 +304,32 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         f"{position_note}\n"
         f"Khud verify karke decide karo."
     )
+
+
 # ============================================
 # EK SCAN CYCLE
 # ============================================
 def run_one_scan():
     global _pending_pairs_cache
+
     print(f"\n{'=' * 60}")
     print(f"SCAN STARTED: {datetime.now()}")
     print('=' * 60)
-    # ---- Cache reset karo har naye run mein ----
-    # (taaki fresh pending list mile, stale cache se kaam na ho)
+
     _pending_pairs_cache = None
-    # ---- BACKTEST: sabse pehle purani pending spikes check karo ----
+
     try:
         backtest_tracker.resolve_pending(dry_run=DRY_RUN)
     except Exception as e:
         print(f"  [backtest_tracker] resolve_pending mein error: {e}")
-    # ---- NAYA: pattern-backtest data collection (Telegram nahi bhejta,
-    # backtest_tracker se poori tarah independent) ----
+
     try:
         pattern_backtest.resolve_pending_patterns(dry_run=DRY_RUN)
     except Exception as e:
         print(f"  [pattern_backtest] resolve_pending_patterns mein error: {e}")
-    # ---- Cooldown cache load karo (resolve ke baad, taaki fresh data mile) ----
+
     _load_pending_pairs_cache()
+
     if TEST_ONLY_PAIRS:
         pairs = TEST_ONLY_PAIRS
     else:
@@ -301,32 +340,38 @@ def run_one_scan():
             return
         if MAX_PAIRS_TO_SCAN:
             pairs = pairs[:MAX_PAIRS_TO_SCAN]
+
     print(f"Scanning {len(pairs)} pairs...")
+
     counts = {"SHORT_ONLY": 0, "LONG_ONLY": 0, "BOTH": 0}
     telegram_sent_count = 0
     strong_telegram_sent_count = 0
     cooldown_skipped_count = 0
+
     for pair in pairs:
         try:
             df = get_candles(pair=pair, resolution=RESOLUTION, days=2)
             if df.empty or len(df) < LOOKBACK_LONG + 1:
                 continue
+
             result = get_intraday_rvol(df, lookback_periods=[LOOKBACK_SHORT, LOOKBACK_LONG])
             last_row = result.iloc[-1]
             rvol_20 = last_row[f"RVOL_{LOOKBACK_SHORT}"]
             rvol_96 = last_row[f"RVOL_{LOOKBACK_LONG}"]
+
             if pd.isna(rvol_20) or pd.isna(rvol_96):
                 continue
+
             trigger_type = classify_trigger_type(rvol_20, rvol_96)
+
             if trigger_type is not None:
                 counts[trigger_type] += 1
-                # ---- COOLDOWN CHECK — sabse pehle ----
-                # Agar pair already pending mein hai, poora block skip karo.
-                # Telegram nahi, Sheet nahi, backtest nahi.
+
                 if _is_in_cooldown(pair):
                     cooldown_skipped_count += 1
                     print(f"  [cooldown] {pair} skip — already pending/cooldown mein hai.")
                     continue
+
                 candle_time = last_row["Time"]
                 candle_open = last_row["Open"]
                 candle_high = last_row["High"]
@@ -335,12 +380,19 @@ def run_one_scan():
                 volume = last_row["Volume"]
                 prev_close = result.iloc[-2]["Close"]
                 candle_color = "GREEN" if close >= candle_open else "RED"
+
                 # ---- SUPPORT/RESISTANCE ----
                 try:
-                    resistance_levels, support_levels = get_support_resistance(
+                    resistance_levels_raw, support_levels_raw = get_support_resistance(
                         df, lookback=SR_LOOKBACK,
                         cluster_tolerance_pct=SR_CLUSTER_TOLERANCE_PCT
                     )
+
+                    # ---- NAYA: MIN_SR_TOUCHES filter ----
+                    # Sirf 5+ touch wale levels valid hain — weak levels ignore
+                    resistance_levels = [r for r in resistance_levels_raw if r[1] >= MIN_SR_TOUCHES]
+                    support_levels = [s for s in support_levels_raw if s[1] >= MIN_SR_TOUCHES]
+
                     sr_result = classify_price_position(
                         close, prev_close, resistance_levels, support_levels,
                         proximity_pct=SR_PROXIMITY_PCT
@@ -348,15 +400,17 @@ def run_one_scan():
                     price_position = sr_result["label"]
                     sr_level_price = sr_result["level_price"]
                     sr_touch_count = sr_result["touch_count"]
+
                 except Exception as e:
                     print(f"  [S/R] {pair} pe error: {e}")
                     price_position = "UNKNOWN"
                     sr_level_price = None
                     sr_touch_count = 0
-                    resistance_levels, support_levels = [], []
+                    resistance_levels = []
+                    support_levels = []
 
-                # ---- NAYA: pre-breakout consolidation + next liquidity zone —
-                # sirf tabhi meaningful hain jab genuine breakout/breakdown ho ----
+                # ---- PRE-BREAKOUT CONSOLIDATION + NEXT LIQUIDITY ZONE ----
+                # Sirf valid 5+ touch S/R level ke against calculate karo
                 pre_breakout_consolidation = None
                 liquidity_zone = None
                 if price_position in ("BREAKOUT_ABOVE_RESISTANCE", "BREAKDOWN_BELOW_SUPPORT"):
@@ -368,7 +422,6 @@ def run_one_scan():
                         )
                     except Exception as e:
                         print(f"  [Consolidation] {pair} pe error: {e}")
-
                     try:
                         direction = "UP" if price_position == "BREAKOUT_ABOVE_RESISTANCE" else "DOWN"
                         liquidity_zone = find_next_liquidity_zone(
@@ -377,6 +430,7 @@ def run_one_scan():
                         )
                     except Exception as e:
                         print(f"  [LiquidityZone] {pair} pe error: {e}")
+
                 # ---- TRENDLINE ----
                 try:
                     trend_ctx = get_trendline_context(df, lookback=TRENDLINE_LOOKBACK)
@@ -390,6 +444,7 @@ def run_one_scan():
                     print(f"  [Trendline] {pair} pe error: {e}")
                     trend_type = "UNKNOWN"
                     trend_detail = ""
+
                 # ---- CANDLE SHAPE ----
                 try:
                     shape_ctx = classify_candle_shape(candle_open, candle_high, candle_low, close)
@@ -398,9 +453,11 @@ def run_one_scan():
                     print(f"  [CandleShape] {pair} pe error: {e}")
                     shape_ctx = {"shape": "UNKNOWN"}
                     candle_shape_label = "UNKNOWN"
+
                 print(f"  🚨 [{trigger_type}] {pair} | RVOL_20={rvol_20:.2f} RVOL_96={rvol_96:.2f} "
                       f"| Close={close} | Position={price_position} (touched {sr_touch_count}x) | "
                       f"Trend={trend_type} | Shape={candle_shape_label} | Time={candle_time}")
+
                 candle_time_ist = to_ist(candle_time)
                 message = build_alert_message(
                     pair, trigger_type, candle_time_ist, close, volume,
@@ -409,25 +466,50 @@ def run_one_scan():
                     pre_breakout_consolidation=pre_breakout_consolidation,
                     liquidity_zone=liquidity_zone,
                 )
+
                 # ---- TELEGRAM ----
+                # Main bot: RVOL_20 >= threshold
+                # NAYA: S/R-based alerts sirf tabhi jayenge jab sr_touch_count >= MIN_SR_TOUCHES
+                # Agar price_position MID_RANGE hai (matlab koi valid 5+ touch level nahi mila),
+                # to S/R condition automatically fail hogi (sr_touch_count = 0 hoga)
+                sr_is_valid = sr_touch_count >= MIN_SR_TOUCHES
+
                 if rvol_20 >= RVOL_20_ALERT_THRESHOLD:
-                    telegram_sent_count += 1
-                    if DRY_RUN:
-                        print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
+                    # Sirf tabhi Telegram bhejo jab:
+                    # 1. MID_RANGE hai (S/R relevant nahi, volume spike pe alert dena theek hai)
+                    # 2. Ya S/R-based position hai AUR touch_count >= MIN_SR_TOUCHES
+                    should_send_main = (
+                        price_position == "MID_RANGE"
+                        or sr_is_valid
+                    )
+
+                    if should_send_main:
+                        telegram_sent_count += 1
+                        if DRY_RUN:
+                            print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
+                        else:
+                            send_telegram_message(message)
+
+                            # Strong bot: DOMINANCE + valid S/R level (5+ touches) + allowed position
+                            is_strong_shape = shape_ctx["shape"] == "DOMINANCE"
+                            is_level_relevant = price_position in STRONG_BOT_ALLOWED_POSITIONS
+                            if is_strong_shape and is_level_relevant and sr_is_valid:
+                                strong_telegram_sent_count += 1
+                                send_strong_telegram_message(message)
                     else:
-                        send_telegram_message(message)
-                        is_strong_shape = shape_ctx["shape"] == "DOMINANCE"
-                        is_level_relevant = price_position in STRONG_BOT_ALLOWED_POSITIONS
-                        if is_strong_shape and is_level_relevant:
-                            strong_telegram_sent_count += 1
-                            send_strong_telegram_message(message)
+                        print(f"  ({pair} S/R level weak — touch_count={sr_touch_count} "
+                              f"< {MIN_SR_TOUCHES} — Telegram S/R alert skip)")
                 else:
                     print(f"  (RVOL_20={rvol_20:.2f} < {RVOL_20_ALERT_THRESHOLD}, "
                           f"Telegram skip — sirf Sheet mein log hua)")
+
                 # ---- SHEET LOGGING ----
+                # Sheet mein SAARI spikes log hoti hain (weak S/R wali bhi)
+                # taaki backtest mein compare kar sakein — filter sirf Telegram pe hai
                 detected_at_ist = (
                     datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
                 ).strftime("%Y-%m-%d %H:%M:%S")
+
                 log_to_sheet([
                     detected_at_ist,
                     str(candle_time),
@@ -447,6 +529,7 @@ def run_one_scan():
                     liquidity_zone["zone_price"] if liquidity_zone and liquidity_zone.get("zone_price") is not None else "",
                     liquidity_zone["distance_pct"] if liquidity_zone and liquidity_zone.get("distance_pct") is not None else "",
                 ])
+
                 # ---- BACKTEST ----
                 try:
                     backtest_tracker.add_pending(
@@ -465,9 +548,8 @@ def run_one_scan():
                     )
                 except Exception as e:
                     print(f"  [backtest_tracker] add_pending mein error: {e}")
-                # ---- NAYA: pattern-backtest tracking shuru karo (sirf
-                # genuine breakout/breakdown ke liye, S/R level chahiye —
-                # backtest_tracker se poori tarah independent, Telegram nahi) ----
+
+                # ---- PATTERN-BACKTEST ----
                 if price_position in ("BREAKOUT_ABOVE_RESISTANCE", "BREAKDOWN_BELOW_SUPPORT"):
                     try:
                         pattern_backtest.add_pending_pattern(
@@ -484,10 +566,13 @@ def run_one_scan():
                         )
                     except Exception as e:
                         print(f"  [pattern_backtest] add_pending_pattern mein error: {e}")
+
             time.sleep(SLEEP_BETWEEN_PAIRS)
+
         except Exception as e:
             print(f"  {pair} pe error aaya, skip kar rahe hain: {e}")
             continue
+
     total_alerts = sum(counts.values())
     print(f"\nScan complete. {total_alerts} spike(s) mile — "
           f"BOTH: {counts['BOTH']}, SHORT_ONLY: {counts['SHORT_ONLY']}, "
@@ -496,6 +581,8 @@ def run_one_scan():
     print(f"Telegram (main) bheja gaya: {telegram_sent_count} "
           f"(RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} wale)")
     print(f"Telegram (strong/DOMINANCE + level-relevant) bheja gaya: {strong_telegram_sent_count}")
+
+
 # ============================================
 # ENTRY POINT
 # ============================================
@@ -504,6 +591,7 @@ if __name__ == "__main__":
     print(f"DRY_RUN = {DRY_RUN}")
     print(f"RVOL_SHORT_THRESHOLD={RVOL_SHORT_THRESHOLD} | RVOL_LONG_THRESHOLD={RVOL_LONG_THRESHOLD}")
     print(f"Telegram sirf RVOL_20 >= {RVOL_20_ALERT_THRESHOLD} pe jayega")
+    print(f"S/R minimum touches: {MIN_SR_TOUCHES} (weak levels ignore honge)")
     print(f"Support/Resistance: ON | Trendline: ON | Candle Shape: ON")
     print(f"Cooldown: ON (Pending_Spikes_V2 se) | Dual Telegram: ON | Pattern-Backtest: ON\n")
     run_one_scan()

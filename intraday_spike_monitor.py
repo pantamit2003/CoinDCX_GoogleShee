@@ -3,6 +3,7 @@ intraday_spike_monitor.py
 ==========================
 NAYA STANDALONE SCRIPT — existing check_watchlist.py / daily_breakout_scan.py /
 volume_watch.py ko bilkul touch nahi karta.
+
 KYA KARTA HAI:
 - Har 15 minute pe (cron-job.org ke external trigger ke through) chalta hai
 - Saare active futures pairs ke 15-min candles CoinDCX se laata hai
@@ -61,7 +62,6 @@ CHALANE KA TARIKA (local testing ke liye bhi):
 """
 import time
 from datetime import datetime, timezone, timedelta
-
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -78,7 +78,6 @@ from candle_shape import classify_candle_shape
 import backtest_tracker
 import pattern_backtest
 import config
-
 
 # ============================================
 # CONFIG — pehle inhe apni marzi se set karo
@@ -128,7 +127,6 @@ SHEET_HEADER = [
     "Trend_Type", "Trend_Detail", "Candle_Shape",
     "Pre_Breakout_Consolidation", "Next_Liquidity_Zone", "Next_Liquidity_Distance_Pct",
 ]
-
 
 # ============================================
 # COOLDOWN — pending pairs cache
@@ -251,7 +249,6 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
         "LONG_ONLY": "Sirf medium-term (1 din) baseline confirm kar raha hai — short-term abhi threshold cross nahi kiya. Dheere-dheere build ho raha volume ho sakta hai.",
     }.get(trigger_type, "")
-
     position_note = {
         "BREAKOUT_ABOVE_RESISTANCE": "🟢 Resistance todke upar nikla — genuine breakout ho sakta hai.",
         "BREAKDOWN_BELOW_SUPPORT": "🔴 Support todke neeche gaya — genuine breakdown ho sakta hai.",
@@ -259,15 +256,12 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         "NEAR_SUPPORT": "⚠️ Support ke paas hai — bounce ya breakdown, dono possible.",
         "MID_RANGE": "Kisi bhi major level ke paas nahi — range ke beech mein.",
     }.get(price_position_label, "")
-
     sr_line = f"<b>Price Position:</b> {price_position_label}"
     if sr_level_price is not None:
         sr_line += f" (Level: {sr_level_price}, tested {sr_touch_count}x pehle)"
-
     trend_line = f"<b>Trend:</b> {trend_type}"
     if trend_detail:
         trend_line += f" ({trend_detail})"
-
     consolidation_line = ""
     if pre_breakout_consolidation is not None:
         n = pre_breakout_consolidation
@@ -278,7 +272,6 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         else:
             note = "WEAK — seedha breakout hua bina consolidation ke, fake hone ka risk zyada"
         consolidation_line = f"\n<b>Pre-Breakout Consolidation:</b> {n} candles ({n * 15} min) — {note}"
-
     liquidity_line = ""
     if liquidity_zone is not None and liquidity_zone.get("zone_price") is not None:
         liquidity_line = (
@@ -286,7 +279,6 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
             f"({liquidity_zone['distance_pct']}% door, tested {liquidity_zone['touch_count']}x pehle) "
             f"— price ab bhi wahan tak khinch sakta hai"
         )
-
     return (
         f"🚨 <b>INTRADAY VOLUME SPIKE — {trigger_type}</b>\n\n"
         f"<b>Pair:</b> {pair}\n"
@@ -311,11 +303,9 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
 # ============================================
 def run_one_scan():
     global _pending_pairs_cache
-
     print(f"\n{'=' * 60}")
     print(f"SCAN STARTED: {datetime.now()}")
     print('=' * 60)
-
     _pending_pairs_cache = None
 
     try:
@@ -342,7 +332,6 @@ def run_one_scan():
             pairs = pairs[:MAX_PAIRS_TO_SCAN]
 
     print(f"Scanning {len(pairs)} pairs...")
-
     counts = {"SHORT_ONLY": 0, "LONG_ONLY": 0, "BOTH": 0}
     telegram_sent_count = 0
     strong_telegram_sent_count = 0
@@ -387,7 +376,6 @@ def run_one_scan():
                         df, lookback=SR_LOOKBACK,
                         cluster_tolerance_pct=SR_CLUSTER_TOLERANCE_PCT
                     )
-
                     # ---- NAYA: MIN_SR_TOUCHES filter ----
                     # Sirf 5+ touch wale levels valid hain — weak levels ignore
                     resistance_levels = [r for r in resistance_levels_raw if r[1] >= MIN_SR_TOUCHES]
@@ -400,7 +388,6 @@ def run_one_scan():
                     price_position = sr_result["label"]
                     sr_level_price = sr_result["level_price"]
                     sr_touch_count = sr_result["touch_count"]
-
                 except Exception as e:
                     print(f"  [S/R] {pair} pe error: {e}")
                     price_position = "UNKNOWN"
@@ -422,6 +409,7 @@ def run_one_scan():
                         )
                     except Exception as e:
                         print(f"  [Consolidation] {pair} pe error: {e}")
+
                     try:
                         direction = "UP" if price_position == "BREAKOUT_ABOVE_RESISTANCE" else "DOWN"
                         liquidity_zone = find_next_liquidity_zone(
@@ -473,7 +461,6 @@ def run_one_scan():
                 # Agar price_position MID_RANGE hai (matlab koi valid 5+ touch level nahi mila),
                 # to S/R condition automatically fail hogi (sr_touch_count = 0 hoga)
                 sr_is_valid = sr_touch_count >= MIN_SR_TOUCHES
-
                 if rvol_20 >= RVOL_20_ALERT_THRESHOLD:
                     # Sirf tabhi Telegram bhejo jab:
                     # 1. MID_RANGE hai (S/R relevant nahi, volume spike pe alert dena theek hai)
@@ -482,14 +469,12 @@ def run_one_scan():
                         price_position == "MID_RANGE"
                         or sr_is_valid
                     )
-
                     if should_send_main:
                         telegram_sent_count += 1
                         if DRY_RUN:
                             print(f"  [DRY_RUN] Telegram message bhejta:\n{message}\n")
                         else:
                             send_telegram_message(message)
-
                             # Strong bot: DOMINANCE + valid S/R level (5+ touches) + allowed position
                             is_strong_shape = shape_ctx["shape"] == "DOMINANCE"
                             is_level_relevant = price_position in STRONG_BOT_ALLOWED_POSITIONS
@@ -509,7 +494,6 @@ def run_one_scan():
                 detected_at_ist = (
                     datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
                 ).strftime("%Y-%m-%d %H:%M:%S")
-
                 log_to_sheet([
                     detected_at_ist,
                     str(candle_time),
@@ -568,7 +552,6 @@ def run_one_scan():
                         print(f"  [pattern_backtest] add_pending_pattern mein error: {e}")
 
             time.sleep(SLEEP_BETWEEN_PAIRS)
-
         except Exception as e:
             print(f"  {pair} pe error aaya, skip kar rahe hain: {e}")
             continue

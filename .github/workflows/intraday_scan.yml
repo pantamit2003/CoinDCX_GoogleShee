@@ -35,6 +35,8 @@ jobs:
           echo "TELEGRAM_CHAT_ID = \"${{ secrets.TELEGRAM_CHAT_ID }}\"" >> telegram_config.py
           echo "TELEGRAM_STRONG_BOT_TOKEN = \"${{ secrets.TELEGRAM_STRONG_BOT_TOKEN }}\"" >> telegram_config.py
           echo "TELEGRAM_STRONG_CHAT_ID = \"${{ secrets.TELEGRAM_STRONG_CHAT_ID }}\"" >> telegram_config.py
+          echo "CONFUSION_BOT_TOKEN = \"${{ secrets.CONFUSION_BOT_TOKEN }}\"" >> telegram_config.py
+          echo "CONFUSION_CHAT_ID = \"${{ secrets.CONFUSION_CHAT_ID }}\"" >> telegram_config.py
 
       - name: Run intraday_spike_monitor.py
         run: python intraday_spike_monitor.py

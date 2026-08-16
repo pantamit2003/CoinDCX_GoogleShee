@@ -55,7 +55,10 @@ from google.oauth2.service_account import Credentials
 from data.candles import get_candles
 from exchange.coindcx import get_active_pairs
 from notifications.telegram_bot import send_telegram_message, send_strong_telegram_message
-from support_resistance import get_support_resistance, classify_price_position
+from support_resistance import (
+    get_support_resistance, classify_price_position,
+    count_pre_breakout_consolidation, find_next_liquidity_zone,
+)
 from trendline import get_trendline_context
 from candle_shape import classify_candle_shape
 import backtest_tracker
@@ -74,6 +77,8 @@ RVOL_20_ALERT_THRESHOLD = 6.0   # Telegram alert SIRF tabhi jayega jab RVOL_20 i
 SR_LOOKBACK = 50
 SR_CLUSTER_TOLERANCE_PCT = 0.5
 SR_PROXIMITY_PCT = 0.5
+CONSOLIDATION_BAND_PCT = 1.5     # pre-breakout consolidation ke liye tolerance band
+CONSOLIDATION_MAX_LOOKBACK = 20  # zyada se zyada kitni candles peeche dekhna hai
 TRENDLINE_LOOKBACK = 60
 MAX_PAIRS_TO_SCAN = 250
 SLEEP_BETWEEN_PAIRS = 0.3
@@ -90,6 +95,7 @@ SHEET_HEADER = [
     "Close", "Volume", "RVOL_20", "RVOL_96",
     "Price_Position", "SR_Level_Price", "SR_Touch_Count",
     "Trend_Type", "Trend_Detail", "Candle_Shape",
+    "Pre_Breakout_Consolidation", "Next_Liquidity_Zone", "Next_Liquidity_Distance_Pct",
 ]
 # ============================================
 # COOLDOWN — pending pairs cache
@@ -201,7 +207,8 @@ def log_to_sheet(row_values):
 # ============================================
 def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
                          rvol_20, rvol_96, price_position_label, sr_level_price,
-                         sr_touch_count, trend_type, trend_detail, candle_shape_label):
+                         sr_touch_count, trend_type, trend_detail, candle_shape_label,
+                         pre_breakout_consolidation=None, liquidity_zone=None):
     trigger_note = {
         "BOTH": "Dono short aur medium-term baseline confirm kar rahe hain — sabse strong signal.",
         "SHORT_ONLY": "Sirf short-term (5 ghante) baseline confirm kar raha hai — medium-term abhi weak. Zyada risky, careful check karo.",
@@ -220,6 +227,29 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
     trend_line = f"<b>Trend:</b> {trend_type}"
     if trend_detail:
         trend_line += f" ({trend_detail})"
+
+    # ---- NAYA: pre-breakout consolidation line — sirf tabhi dikhega
+    # jab yeh feature applicable thi (breakout/breakdown spikes ke liye) ----
+    consolidation_line = ""
+    if pre_breakout_consolidation is not None:
+        n = pre_breakout_consolidation
+        if n >= 6:
+            note = "STRONG — achhi consolidation hui breakout se pehle, genuine hone ka chance zyada"
+        elif n >= 2:
+            note = "MODERATE — thodi consolidation hui, kuch confidence deta hai"
+        else:
+            note = "WEAK — seedha breakout hua bina consolidation ke, fake hone ka risk zyada"
+        consolidation_line = f"\n<b>Pre-Breakout Consolidation:</b> {n} candles ({n * 15} min) — {note}"
+
+    # ---- NAYA: next liquidity zone line — sirf breakout/breakdown ke liye ----
+    liquidity_line = ""
+    if liquidity_zone is not None and liquidity_zone.get("zone_price") is not None:
+        liquidity_line = (
+            f"\n<b>Next Liquidity Zone:</b> {liquidity_zone['zone_price']} "
+            f"({liquidity_zone['distance_pct']}% door, tested {liquidity_zone['touch_count']}x pehle) "
+            f"— price ab bhi wahan tak khinch sakta hai"
+        )
+
     return (
         f"🚨 <b>INTRADAY VOLUME SPIKE — {trigger_type}</b>\n\n"
         f"<b>Pair:</b> {pair}\n"
@@ -230,7 +260,9 @@ def build_alert_message(pair, trigger_type, candle_time_ist, close, volume,
         f"<b>RVOL_96:</b> {rvol_96:.2f}x\n"
         f"{sr_line}\n"
         f"{trend_line}\n"
-        f"<b>Candle Shape:</b> {candle_shape_label}\n\n"
+        f"<b>Candle Shape:</b> {candle_shape_label}"
+        f"{consolidation_line}"
+        f"{liquidity_line}\n\n"
         f"{trigger_note}\n"
         f"{position_note}\n"
         f"Khud verify karke decide karo."
@@ -321,6 +353,30 @@ def run_one_scan():
                     price_position = "UNKNOWN"
                     sr_level_price = None
                     sr_touch_count = 0
+                    resistance_levels, support_levels = [], []
+
+                # ---- NAYA: pre-breakout consolidation + next liquidity zone —
+                # sirf tabhi meaningful hain jab genuine breakout/breakdown ho ----
+                pre_breakout_consolidation = None
+                liquidity_zone = None
+                if price_position in ("BREAKOUT_ABOVE_RESISTANCE", "BREAKDOWN_BELOW_SUPPORT"):
+                    try:
+                        pre_breakout_consolidation = count_pre_breakout_consolidation(
+                            df, sr_level_price,
+                            band_pct=CONSOLIDATION_BAND_PCT,
+                            max_lookback=CONSOLIDATION_MAX_LOOKBACK,
+                        )
+                    except Exception as e:
+                        print(f"  [Consolidation] {pair} pe error: {e}")
+
+                    try:
+                        direction = "UP" if price_position == "BREAKOUT_ABOVE_RESISTANCE" else "DOWN"
+                        liquidity_zone = find_next_liquidity_zone(
+                            close, resistance_levels, support_levels,
+                            broken_level_price=sr_level_price, direction=direction,
+                        )
+                    except Exception as e:
+                        print(f"  [LiquidityZone] {pair} pe error: {e}")
                 # ---- TRENDLINE ----
                 try:
                     trend_ctx = get_trendline_context(df, lookback=TRENDLINE_LOOKBACK)
@@ -349,7 +405,9 @@ def run_one_scan():
                 message = build_alert_message(
                     pair, trigger_type, candle_time_ist, close, volume,
                     rvol_20, rvol_96, price_position, sr_level_price, sr_touch_count,
-                    trend_type, trend_detail, candle_shape_label
+                    trend_type, trend_detail, candle_shape_label,
+                    pre_breakout_consolidation=pre_breakout_consolidation,
+                    liquidity_zone=liquidity_zone,
                 )
                 # ---- TELEGRAM ----
                 if rvol_20 >= RVOL_20_ALERT_THRESHOLD:
@@ -385,6 +443,9 @@ def run_one_scan():
                     trend_type,
                     trend_detail,
                     candle_shape_label,
+                    pre_breakout_consolidation if pre_breakout_consolidation is not None else "",
+                    liquidity_zone["zone_price"] if liquidity_zone and liquidity_zone.get("zone_price") is not None else "",
+                    liquidity_zone["distance_pct"] if liquidity_zone and liquidity_zone.get("distance_pct") is not None else "",
                 ])
                 # ---- BACKTEST ----
                 try:

@@ -1,5 +1,6 @@
 """
 notifications/telegram_bot.py
+
 Simple helper: koi bhi text message tumhare Telegram bot se tumhare
 phone pe bhej deta hai. Teeno scanner scripts ise use karenge jab
 koi genuine signal mile.
@@ -12,11 +13,17 @@ HOW TO USE:
     # alag bot/chat pe (clutter-free channel):
     from notifications.telegram_bot import send_strong_telegram_message
     send_strong_telegram_message("Strong signal!")
+
+    # Sirf CONFUSING / unclear signals ke liye, apne alag bot/chat pe:
+    from notifications.telegram_bot import send_confusion_telegram_message
+    send_confusion_telegram_message("Confusing signal detected!")
 """
+
 import requests
 from telegram_config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     TELEGRAM_STRONG_BOT_TOKEN, TELEGRAM_STRONG_CHAT_ID,
+    CONFUSION_BOT_TOKEN, CONFUSION_CHAT_ID,
 )
 
 
@@ -48,7 +55,6 @@ def send_strong_telegram_message(text: str) -> bool:
     sirf tabhi call hota hai jab signal "high-conviction" ho (jaise
     DOMINANCE candle shape) — taaki phone pe ek clean, kam-clutter
     wala channel bane, sirf sabse strong signals ke liye.
-
     Same tarike se True/False return karta hai, crash-safe hai.
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_STRONG_BOT_TOKEN}/sendMessage"
@@ -63,4 +69,28 @@ def send_strong_telegram_message(text: str) -> bool:
         return True
     except Exception as e:
         print(f"Strong Telegram message bhejne mein error aaya: {e}")
+        return False
+
+
+def send_confusion_telegram_message(text: str) -> bool:
+    """
+    Telegram pe message bhejta hai — CONFUSION bot aur chat pe. Ye
+    tab call hota hai jab signal "confusing" / unclear ho (jaise
+    do opposite signals ek saath, ya indecisive candle pattern) —
+    taaki inhe main aur strong signals se alag, apne dedicated
+    channel mein track kiya ja sake.
+    Same tarike se True/False return karta hai, crash-safe hai.
+    """
+    url = f"https://api.telegram.org/bot{CONFUSION_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CONFUSION_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+    }
+    try:
+        response = requests.post(url, data=payload, timeout=15)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"Confusion Telegram message bhejne mein error aaya: {e}")
         return False

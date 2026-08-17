@@ -1,11 +1,12 @@
 """
 sr_shape_outcome_tracker.py
 =============================
-NAYA STANDALONE MODULE — RVOL/spike-trigger se bilkul INDEPENDENT tha,
-ab is version (v3) mein RVOL bhi ek GATING condition ban gaya hai —
-neeche "NAYA v3" comments mein detail hai.
+v4 — RESEARCH-MODE REWRITE. Filters relaxed, direction-decision logic
+CHANGED (no longer S/R-position-based, ab NEXT-CANDLE breakout se
+confirm hoti hai). Purana v2/v3 wala "Support+CONFUSION=LONG" rule
+HATA diya gaya hai.
 
-YEH FLOWCHART IMPLEMENT KARTA HAI:
+YEH FLOWCHART IMPLEMENT KARTA HAI (v4):
 
     15-min candle
         |
@@ -19,101 +20,113 @@ YEH FLOWCHART IMPLEMENT KARTA HAI:
         |
     SIRF CONFUSION wali candles aage jaati hain (DOMINANCE/REJECTION skip)
         |
-    NAYA v3: Kya is candle ka RVOL bhi threshold cross kar raha hai?
+    Kya is candle ka RVOL bhi threshold cross kar raha hai?
         (RVOL_20 >= RVOL_SHORT_THRESHOLD  YA  RVOL_96 >= RVOL_LONG_THRESHOLD)
         |
-       NO -> skip (volume ka support nahi hai, setup weak maana jayega)
-       YES -> aage badho
+       NO -> skip (volume ka support nahi hai)
+       YES -> CONFUSION candle ka HIGH/LOW record karo, "AWAITING
+              CONFIRMATION" state mein daal do (abhi LONG/SHORT
+              decide NAHI karna)
         |
-    Support + CONFUSION -> LONG setup   |   Resistance + CONFUSION -> SHORT setup
+    Agla (next) 15-min candle kya karti hai?
+        CONFUSION HIGH break        -> LONG  (Entry = Confusion High, SL = Confusion Low)
+        CONFUSION LOW break         -> SHORT (Entry = Confusion Low,  SL = Confusion High)
+        Neither break (ya dono break -> ambiguous) -> NO_CONFIRMATION (record karo, outcome tracking skip)
         |
-    Entry = confusion candle Close
-    SL    = LONG: confusion candle LOW  |  SHORT: confusion candle HIGH
-        |
-    Uske baad next 15/30/45/60/90/120 min mein kya hua?
+    Confirm hone ke baad (LONG/SHORT), confirmation-candle ke time se
+    next 15/30/45/60/90/120 min mein kya hua?
     (price movement, SL hit/nahi, target R-multiples hit/nahi,
      max favorable/adverse move)
         |
     BACKTEST DATA (Google Sheet mein)
 
-MAIN OBJECTIVE (v3):
-    "5+ touch Support/Resistance par, VOLUME SPIKE (RVOL) ke saath
-    CONFUSION candle banne ke baad, confusion candle ke LOW/HIGH ko SL
-    rakhkar trade karne par historically kya outcome aata hai?" — sirf
-    DATA collect karta hai, koi profitability assume nahi karta.
+MAIN OBJECTIVE (v4 — pure research phase):
+    "S/R (chahe kam touches wale bhi) ke paas CONFUSION candle bane,
+    thoda relaxed RVOL ho, aur AGLI candle CONFUSION HIGH/LOW break
+    kare — to us breakout direction mein trade karne par historically
+    kya outcome aata hai?" Koi hard reliability assumption nahi —
+    sirf broad data collect karna hai taaki baad mein SR_Touch_Count,
+    RVOL range aur breakout-direction ke combinations ka asar analyze
+    ho sake.
 
-KYUN ALAG MODULE:
-    - backtest_tracker.py RVOL-spike TRIGGER se chalta hai aur horizons
-      15/45/75 min (candles 1,3,5) track karta hai.
-    - Yeh module kisi bhi 15-min candle ko process kar sakta hai —
-      condition hai: price valid (MIN_SR_TOUCHES+) S/R level ke paas ho,
-      candle shape CONFUSION ho, AUR (v3 se) RVOL bhi threshold cross
-      kare. Horizons 15/30/45/60/90/120 min (candles 1,2,3,4,6,8).
-    - Isliye purana backtest_tracker.py / pattern_backtest.py /
+KYA BADLA v3 -> v4 (IMPORTANT):
+    1. MIN_SR_TOUCHES: 5 -> 2 (ab hard-cutoff nahi, sirf minimum
+       floor hai — 2/3/4/5/6+ sab record honge, SR_Touch_Count column
+       se baad mein filter karna).
+    2. RVOL gate relax: RVOL_20>=5 OR RVOL_96>=6  ->  RVOL_20>=2 OR
+       RVOL_96>=2 (dono values hamesha record hote hain, gate sirf
+       itna strict hai ki bilkul flat/no-volume candles chhoot jaayein).
+    3. DIRECTION LOGIC BADLI: pehle "Support+CONFUSION=LONG,
+       Resistance+CONFUSION=SHORT" tha (S/R position se direction).
+       AB: S/R sirf ek "important level" identify karta hai, khud
+       direction decide NAHI karta. Direction ab NEXT candle ke
+       CONFUSION-candle HIGH/LOW breakout se confirm hoti hai:
+           Next candle CONFUSION HIGH todhe -> LONG
+           Next candle CONFUSION LOW todhe  -> SHORT
+           Dono ya koi nahi -> NO_CONFIRMATION (skip / record-only)
+    4. Isliye ab TWO-STAGE pending flow hai (naye sheet tabs):
+           Confusion_Awaiting_Confirmation  — CONFUSION+SR+RVOL pass
+               hui candles, jo agli candle ka wait kar rahi hain.
+           Confusion_Pending                — jinka breakout confirm
+               ho gaya (LONG/SHORT), ab 120-min outcome ka wait kar
+               rahi hain.
+           Confusion_Backtest_Data          — final results (LONG/
+               SHORT ka pura outcome, aur NO_CONFIRMATION cases bhi
+               blank-outcome ke saath record hote hain — taaki pata
+               chale kitni baar confirmation nahi milta).
+
+KYUN ALAG MODULE (unchanged):
+    - backtest_tracker.py RVOL-spike TRIGGER se chalta hai, alag
+      horizons/logic use karta hai.
+    - Yeh module purana backtest_tracker.py / pattern_backtest.py /
       Trendline / main-Telegram-bot / Consolidation logic / candle-shape
-      classification / MIN_SR_TOUCHES / existing S/R detection ko
-      BILKUL touch nahi kiya. Sirf naye, alag Google Sheet tabs use
-      hote hain: Confusion_Pending aur Confusion_Backtest_Data.
-    - RVOL calculation ka logic bhi wahi hai jo intraday_spike_monitor.py
-      mein hai (rolling mean, shift(1), current volume / baseline) —
-      koi naya formula nahi, sirf yahan bhi apply kiya gaya hai, aur
-      ab yahan gating condition ke roop mein bhi use ho raha hai.
+      classification / existing S/R detection ko BILKUL touch nahi
+      karta. Sirf apne teen naye Google Sheet tabs use karta hai.
+
+SL / TARGET LOGIC (v4):
+    Break Direction = LONG  (next candle CONFUSION HIGH todhi)
+        Entry = Confusion candle HIGH  (jahan breakout hua)
+        SL    = Confusion candle LOW
+        Risk  = Entry - SL
+        Target_nR = Entry + n * Risk
+    Break Direction = SHORT (next candle CONFUSION LOW todhi)
+        Entry = Confusion candle LOW
+        SL    = Confusion candle HIGH
+        Risk  = SL - Entry
+        Target_nR = Entry - n * Risk
+
+    Outcome-horizons (15/30/45/60/90/120 min) ab CONFIRMATION candle
+    (next candle) ke time se count hote hain — kyunki wahi woh point
+    hai jahan actual entry milta.
+
+    SAME-CANDLE AMBIGUITY (documented assumption, koi profitability
+    claim nahi): agar ek hi future candle ke andar SL aur Target dono
+    price-range mein aa jaayein, to CONSERVATIVELY maan lete hain ki
+    SL pehle hit hua. Similarly agar confirmation-candle khud CONFUSION
+    HIGH aur LOW dono break kare, to us candle ko ambiguous maankar
+    NO_CONFIRMATION record kiya jaata hai (documented convention,
+    koi directional bias claim nahi).
+
+VOLUME / RVOL (v4 — relaxed gate, unchanged formula):
+    qualify (Stage 1) = (valid S/R ke paas, touches >= MIN_SR_TOUCHES)
+                        AND (shape == CONFUSION)
+                        AND (RVOL_20 >= RVOL_SHORT_THRESHOLD
+                             OR RVOL_96 >= RVOL_LONG_THRESHOLD)
+    RVOL_20 aur RVOL_96 dono values (chahe threshold cross karein ya
+    na karein — ab bhi) Awaiting/Pending/Results teeno sheets mein
+    record hoti hain.
+    Calculation logic bilkul intraday_spike_monitor.py ke
+    get_intraday_rvol() jaisa hi hai — koi naya formula nahi.
 
 KAISE HOOK KARNA HAI (OPTIONAL):
     import sr_shape_outcome_tracker as sr_shape_tracker
     ...
-    sr_shape_tracker.resolve_pending(dry_run=DRY_RUN)          # scan shuru mein ek baar
+    sr_shape_tracker.resolve_confirmations(dry_run=DRY_RUN)  # scan shuru mein
+    sr_shape_tracker.resolve_pending(dry_run=DRY_RUN)        # scan shuru mein
     ...
     sr_shape_tracker.process_candle(pair, df, dry_run=DRY_RUN)  # har pair ke liye
     Optional hai — is file ko import na karo to kuch bhi existing
     behaviour change nahi hota.
-
-SL / TARGET LOGIC (v2):
-    Support + CONFUSION => LONG
-        Entry = Close
-        SL    = confusion candle ka LOW
-        Risk  = Entry - SL
-        Target_nR = Entry + n * Risk
-    Resistance + CONFUSION => SHORT
-        Entry = Close
-        SL    = confusion candle ka HIGH
-        Risk  = SL - Entry
-        Target_nR = Entry - n * Risk
-
-    SL/Target detection candle ke HIGH/LOW se hota hai, sirf Close se
-    nahi — future har candle (signal candle ke baad, 120-min window
-    tak) ka High/Low check hota hai.
-
-    SAME-CANDLE AMBIGUITY (documented assumption, koi profitability
-    claim nahi): agar ek hi future candle ke andar SL aur Target dono
-    price-range mein aa jaayein, to hum CONSERVATIVELY maan lete hain
-    ki SL pehle hit hua (kyunki OHLC data se intrabar sequence pata
-    nahi chalta). Yeh sirf ek measurement convention hai.
-
-VOLUME / RVOL GATING (NAYA — v3):
-    Pehle is module mein RVOL ka koi role nahi tha — sirf S/R + shape
-    (CONFUSION) se hi setup qualify hota tha. Ab (v3) RVOL bhi ek
-    zaroori condition ban gaya hai:
-
-        qualify = (valid S/R ke paas) AND (shape == CONFUSION)
-                  AND (RVOL_20 >= RVOL_SHORT_THRESHOLD
-                       OR RVOL_96 >= RVOL_LONG_THRESHOLD)
-
-    Matlab: sirf wahi CONFUSION candles aage jaayengi jinke peeche
-    volume ka bhi support ho (chahe short-term RVOL_20 spike ho ya
-    long-term RVOL_96 spike ho — dono mein se ek kaafi hai, "OR"
-    condition, "AND" nahi — isse setups zyada strict-only-BOTH nahi
-    ho jaate).
-
-    RVOL_20 aur RVOL_96 dono values (chahe threshold cross karein ya
-    na karein) ab Pending aur Results dono sheets mein record hoti
-    hain, taaki baad mein backtest mein RVOL vs outcome ka relation
-    bhi analyze kiya ja sake.
-
-    Yeh calculation logic bilkul intraday_spike_monitor.py ke
-    get_intraday_rvol() jaisa hi hai (rolling(window).mean().shift(1),
-    phir current volume / baseline) — sirf yahan last candle ke liye
-    nikala jaata hai.
 """
 from datetime import datetime, timedelta, timezone
 import pandas as pd
@@ -138,42 +151,58 @@ HORIZONS_CANDLES = [m // RESOLUTION_MINUTES for m in HORIZONS_MINUTES]  # [1,2,3
 SR_LOOKBACK = 50
 SR_CLUSTER_TOLERANCE_PCT = 0.5
 SR_PROXIMITY_PCT = 0.5
-MIN_SR_TOUCHES = 5   # backtest_tracker.py / intraday_spike_monitor.py jaisa hi standard
 
-# ---- NAYA v3: RVOL (volume) config — intraday_spike_monitor.py jaisa hi ----
+# NAYA v4: ab hard filter nahi, sirf minimum floor — 2,3,4,5,6+ sab
+# record honge (SR_Touch_Count column se baad mein slice karna).
+MIN_SR_TOUCHES = 2
+
+# ---- RVOL (volume) config — intraday_spike_monitor.py jaisa hi formula ----
 LOOKBACK_SHORT = 20     # RVOL_20 baseline (~5 ghante)
 LOOKBACK_LONG = 96      # RVOL_96 baseline (~1 din)
-RVOL_SHORT_THRESHOLD = 5.0   # RVOL_20 is se upar -> volume-gate pass
-RVOL_LONG_THRESHOLD = 6.0    # RVOL_96 is se upar -> volume-gate pass
+
+# NAYA v4: relaxed research-phase gate (pehle 5.0 / 6.0 tha)
+RVOL_SHORT_THRESHOLD = 2.0   # RVOL_20 is se upar -> volume-gate pass
+RVOL_LONG_THRESHOLD = 2.0    # RVOL_96 is se upar -> volume-gate pass
 # Gate pass hone ke liye dono mein se sirf EK condition true honi chahiye (OR).
 
 MAX_AGE_HOURS = 6                 # itni der baad bhi resolve na ho paaye to discard
 MATCH_TOLERANCE_MINUTES = 7       # future-candle match karte waqt tolerance
 
-# v2: Risk-reward multiples jinke target-hit backtest mein check karne hain
+# Risk-reward multiples jinke target-hit backtest mein check karne hain
 TARGET_RR = [1, 1.5, 2, 3]
 
 
 def _rr_label(rr):
     """1 -> '1R', 1.5 -> '1.5R', 2 -> '2R' — column-naming ke liye."""
-    return (f"{rr:g}R")
+    return f"{rr:g}R"
 
 
-# "Confusion" naming ke saath worksheet names (sirf naam, baaki logic same)
+# "Confusion" naming ke saath worksheet names
+AWAITING_WORKSHEET_NAME = "Confusion_Awaiting_Confirmation"
 PENDING_WORKSHEET_NAME = "Confusion_Pending"
 RESULTS_WORKSHEET_NAME = "Confusion_Backtest_Data"
 
 # price_position labels jo "Support" side ka concept represent karte hain
-# (LONG setup) vs "Resistance" side (SHORT setup).
+# vs "Resistance" side — ab sirf RECORDING/labeling ke liye, DIRECTION
+# decide karne ke liye NAHI use hote (v4 change).
 SUPPORT_POSITIONS = ("NEAR_SUPPORT", "BREAKDOWN_BELOW_SUPPORT")
 RESISTANCE_POSITIONS = ("NEAR_RESISTANCE", "BREAKOUT_ABOVE_RESISTANCE")
+
+AWAITING_HEADER = [
+    "Pair", "Candle_Time_UTC", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
+    "Price_Position", "SR_Level_Price", "SR_Touch_Count",
+    "Candle_Shape", "Shape_Strength", "Body_Pct", "Rejection_Side",
+    "Candle_High", "Candle_Low",
+    "Status",
+]
 
 PENDING_HEADER = [
     "Pair", "Candle_Time_UTC", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
     "Price_Position", "SR_Level_Price", "SR_Touch_Count",
     "Candle_Shape", "Shape_Strength", "Body_Pct", "Rejection_Side",
-    "Candle_High", "Candle_Low",
-    "Setup_Direction", "Entry_Price", "Stop_Loss", "SL_Distance_Pct",
+    "Confusion_High", "Confusion_Low", "Confusion_Close",
+    "Next_Candle_Time_UTC", "Next_Candle_High", "Next_Candle_Low",
+    "Break_Direction", "Entry_Price", "Stop_Loss", "SL_Distance_Pct",
     "Status",
 ]
 
@@ -181,7 +210,9 @@ RESULTS_HEADER = (
     ["Pair", "Candle_Time_UTC", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
      "Price_Position", "SR_Level_Price", "SR_Touch_Count",
      "Candle_Shape", "Shape_Strength", "Body_Pct", "Rejection_Side",
-     "Setup_Direction", "Entry_Price", "Stop_Loss", "SL_Distance_Pct"]
+     "Confusion_High", "Confusion_Low", "Confusion_Close",
+     "Next_Candle_Time_UTC", "Next_Candle_High", "Next_Candle_Low",
+     "Break_Direction", "Entry_Price", "Stop_Loss", "SL_Distance_Pct"]
     + [f"Price_After_{m}min" for m in HORIZONS_MINUTES]
     + [f"PctChg_{m}min" for m in HORIZONS_MINUTES]
     + ["Max_Favorable_Move_Pct", "Max_Adverse_Move_Pct"]
@@ -193,6 +224,7 @@ RESULTS_HEADER = (
 # GOOGLE SHEETS CONNECTION
 # ============================================
 _client = None
+_awaiting_ws = None
 _pending_ws = None
 _results_ws = None
 
@@ -207,6 +239,22 @@ def _connect():
         creds = Credentials.from_service_account_file(str(config.CREDENTIALS_FILE), scopes=scopes)
         _client = gspread.authorize(creds)
     return _client
+
+
+def _get_awaiting_worksheet():
+    global _awaiting_ws
+    if _awaiting_ws is not None:
+        return _awaiting_ws
+    client = _connect()
+    spreadsheet = client.open_by_key(config.SHEET_ID)
+    try:
+        _awaiting_ws = spreadsheet.worksheet(AWAITING_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        _awaiting_ws = spreadsheet.add_worksheet(
+            title=AWAITING_WORKSHEET_NAME, rows=1000, cols=len(AWAITING_HEADER) + 2
+        )
+        _awaiting_ws.append_row(AWAITING_HEADER, table_range="A1")
+    return _awaiting_ws
 
 
 def _get_pending_worksheet():
@@ -271,27 +319,46 @@ def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINU
     return False, None
 
 
-def _is_pair_already_pending(records, pair):
+def _find_next_candle(df, candle_time, resolution_minutes=RESOLUTION_MINUTES,
+                       tolerance_minutes=MATCH_TOLERANCE_MINUTES):
+    """
+    CONFUSION candle ke turant baad wali (agli) 15-min candle dhoondta
+    hai — candle_time se strictly baad, aur candle_time + resolution
+    ke sabse kareeb honi chahiye (tolerance ke andar).
+    Return: (found: bool, row: pandas.Series or None)
+    """
+    df_times = df["Time"]
+    if df_times.dt.tz is None:
+        df_times = df_times.dt.tz_localize("UTC")
+    target_time = candle_time + timedelta(minutes=resolution_minutes)
+    diffs = (df_times - target_time).abs()
+    within_tolerance_mask = diffs <= timedelta(minutes=tolerance_minutes)
+    after_signal_mask = df_times > candle_time
+    candidate_mask = within_tolerance_mask & after_signal_mask
+    if not candidate_mask.any():
+        return False, None
+    candidate_diffs = diffs[candidate_mask]
+    best_idx = candidate_diffs.idxmin()
+    return True, df.loc[best_idx]
+
+
+def _is_pair_already_active(records, pair, status_field="Status", active_values=("PENDING", "AWAITING_CONFIRMATION")):
     for r in records:
-        if r.get("Pair") == pair and str(r.get("Status", "")).upper() == "PENDING":
+        if r.get("Pair") == pair and str(r.get(status_field, "")).upper() in active_values:
             return True
     return False
 
 
 # ============================================
-# NAYA v3: RVOL CALCULATION (intraday_spike_monitor.py jaisa hi logic)
+# RVOL CALCULATION (intraday_spike_monitor.py jaisa hi logic)
 # ============================================
 def _get_rvol_for_last_candle(df, lookback_periods=(LOOKBACK_SHORT, LOOKBACK_LONG)):
     """
     intraday_spike_monitor.py ke get_intraday_rvol() jaisa hi formula —
     (current volume) / (pichli N candles ka rolling average volume,
     shift(1) taaki current candle khud apne baseline mein shamil na ho).
-    Sirf last (abhi-abhi close hui) candle ke liye value chahiye,
-    isliye poore dataframe pe rolling apply karke sirf last row lete hain.
-
+    Sirf last (abhi-abhi close hui) candle ke liye value chahiye.
     Return: dict {period: rvol_value_or_None}
-        None tab jab itni candles hi available na hon (rolling window
-        ke liye insufficient history).
     """
     result = {}
     work_df = df.copy()
@@ -306,10 +373,9 @@ def _get_rvol_for_last_candle(df, lookback_periods=(LOOKBACK_SHORT, LOOKBACK_LON
 
 def _rvol_gate_passed(rvol_20, rvol_96):
     """
-    NAYA v3 — volume gate: RVOL_20 >= RVOL_SHORT_THRESHOLD
+    Volume gate (v4, relaxed): RVOL_20 >= RVOL_SHORT_THRESHOLD
     YA RVOL_96 >= RVOL_LONG_THRESHOLD (OR condition, dono mandatory nahi).
-    Agar dono None hain (insufficient history) to gate FAIL maana jayega
-    — bina volume-context ke setup qualify nahi karna chahiye.
+    Agar dono None hain (insufficient history) to gate FAIL maana jayega.
     """
     cond_short = (rvol_20 is not None) and (rvol_20 >= RVOL_SHORT_THRESHOLD)
     cond_long = (rvol_96 is not None) and (rvol_96 >= RVOL_LONG_THRESHOLD)
@@ -317,23 +383,21 @@ def _rvol_gate_passed(rvol_20, rvol_96):
 
 
 # ============================================
-# STEP 1-5: EK CANDLE KO PROCESS KARNA
+# STAGE 1: CONFUSION candle detect karna + AWAITING_CONFIRMATION mein daalna
 # ============================================
 def process_candle(pair, df, dry_run=False):
     """
-    Flowchart ke Step 1-6 implement karta hai ek pair ke liye:
+    Flowchart Stage 1 implement karta hai ek pair ke liye:
         15-min candle -> valid S/R ke paas? -> shape classify ->
-        SIRF CONFUSION -> NAYA v3: RVOL gate pass? ->
-        setup direction + entry/SL nikalo -> pending mein daal do
-        (future outcome baad mein resolve() karega).
+        SIRF CONFUSION -> RVOL gate pass? -> High/Low record karke
+        AWAITING_CONFIRMATION mein daal do.
+    DIRECTION YAHAN DECIDE NAHI HOTI (v4 change) — woh
+    resolve_confirmations() next candle dekhkar karega.
 
     df: candle dataframe (kam se kam SR_LOOKBACK+ candles chahiye,
         columns: Time/Open/High/Low/Close/Volume)
-
-    Return: True agar candle qualify hoke pending mein add hui,
-            False agar skip hui (valid S/R ke paas nahi thi, shape
-            CONFUSION nahi thi, RVOL gate fail hua, direction determine
-            nahi ho paayi, cooldown mein thi, ya data insufficient tha).
+    Return: True agar candle qualify hoke awaiting-confirmation mein
+            add hui, False agar skip hui.
     """
     if df is None or df.empty or len(df) < SR_LOOKBACK + 2:
         return False
@@ -347,7 +411,7 @@ def process_candle(pair, df, dry_run=False):
     candle_time = last_row["Time"]
     candle_color = "GREEN" if close >= candle_open else "RED"
 
-    # ---- STEP 2: Valid Support/Resistance ke paas hai? ----
+    # ---- Valid Support/Resistance ke paas hai? ----
     try:
         resistance_raw, support_raw = get_support_resistance(
             df, lookback=SR_LOOKBACK, cluster_tolerance_pct=SR_CLUSTER_TOLERANCE_PCT
@@ -366,14 +430,10 @@ def process_candle(pair, df, dry_run=False):
     sr_level_price = sr_result["level_price"]
     sr_touch_count = sr_result["touch_count"]
 
-    # "Valid S/R ke paas" = kisi bhi non-MID_RANGE label ke saath aana
-    # (NEAR_RESISTANCE / NEAR_SUPPORT / BREAKOUT_ABOVE_RESISTANCE /
-    # BREAKDOWN_BELOW_SUPPORT) — MID_RANGE ka matlab hai koi valid
-    # (5+ touch) level nazdeek nahi hai.
     if price_position == "MID_RANGE" or sr_level_price is None:
         return False
 
-    # ---- STEP 3: Candle shape classify karo ----
+    # ---- Candle shape classify karo ----
     try:
         shape_ctx = classify_candle_shape(candle_open, candle_high, candle_low, close)
     except Exception as e:
@@ -381,67 +441,42 @@ def process_candle(pair, df, dry_run=False):
         return False
 
     # ---- CONFUSION-ONLY FILTER ----
-    # Sirf CONFUSION shape wali candles hi track karni hain — DOMINANCE
-    # aur REJECTION wali candles yahin skip ho jaati hain.
     if shape_ctx["shape"] != "CONFUSION":
         return False
 
-    # ---- NAYA v3: RVOL nikaalo (S/R + CONFUSION dono confirm hone ke baad) ----
+    # ---- RVOL nikaalo ----
     rvol_vals = _get_rvol_for_last_candle(df, lookback_periods=(LOOKBACK_SHORT, LOOKBACK_LONG))
     rvol_20 = rvol_vals[LOOKBACK_SHORT]
     rvol_96 = rvol_vals[LOOKBACK_LONG]
 
-    # ---- NAYA v3: VOLUME GATE — S/R + CONFUSION ke paas RVOL bhi confirm karo ----
-    # Agar volume ka support nahi hai (na short-term na long-term RVOL
-    # threshold cross hua), to is setup ko weak maankar skip karo.
+    # ---- VOLUME GATE (relaxed v4) ----
     if not _rvol_gate_passed(rvol_20, rvol_96):
         print(f"  [sr_shape_tracker] {pair} S/R+CONFUSION mila lekin RVOL gate FAIL "
               f"(RVOL_20={rvol_20}, RVOL_96={rvol_96}, need >= {RVOL_SHORT_THRESHOLD} "
               f"ya >= {RVOL_LONG_THRESHOLD}) — skip.")
         return False
 
-    # ---- SETUP DIRECTION (v2): Support+CONFUSION => LONG,
-    #      Resistance+CONFUSION => SHORT ----
-    if price_position in SUPPORT_POSITIONS:
-        setup_direction = "LONG"
-        entry_price = close
-        stop_loss = candle_low
-    elif price_position in RESISTANCE_POSITIONS:
-        setup_direction = "SHORT"
-        entry_price = close
-        stop_loss = candle_high
-    else:
-        # Safety net — abhi tak sirf 4 non-MID_RANGE labels hi possible
-        # hain, lekin agar future mein naya label add ho to yahan
-        # direction determine nahi ho payegi, isliye skip.
+    # ---- COOLDOWN: same pair already awaiting-confirmation ya pending ho to skip ----
+    awaiting_ws = _get_awaiting_worksheet()
+    existing_awaiting = awaiting_ws.get_all_records()
+    if _is_pair_already_active(existing_awaiting, pair, active_values=("AWAITING_CONFIRMATION",)):
+        print(f"  [sr_shape_tracker] {pair} already awaiting confirmation — skip.")
+        return False
+    pending_ws = _get_pending_worksheet()
+    existing_pending = pending_ws.get_all_records()
+    if _is_pair_already_active(existing_pending, pair, active_values=("PENDING",)):
+        print(f"  [sr_shape_tracker] {pair} already pending (outcome tracking) — skip.")
         return False
 
-    if setup_direction == "LONG":
-        sl_distance_pct = round((entry_price - stop_loss) / entry_price * 100, 3)
-    else:
-        sl_distance_pct = round((stop_loss - entry_price) / entry_price * 100, 3)
-
-    # SL distance 0 ya negative ho (flat/degenerate candle) to setup
-    # invalid hai — risk calculate nahi ho sakta, isliye skip.
-    if sl_distance_pct <= 0:
-        return False
-
-    # ---- COOLDOWN: same pair already pending ho to skip ----
-    ws = _get_pending_worksheet()
-    existing_records = ws.get_all_records()
-    if _is_pair_already_pending(existing_records, pair):
-        print(f"  [sr_shape_tracker] {pair} already pending — skip.")
-        return False
-
-    # ---- STEP 5: Pending mein add karo (future outcome baad mein) ----
+    # ---- AWAITING_CONFIRMATION mein add karo (direction abhi nahi) ----
     if dry_run:
-        print(f"  [sr_shape_tracker][DRY_RUN] {pair} pending add: "
+        print(f"  [sr_shape_tracker][DRY_RUN] {pair} awaiting-confirmation add: "
               f"pos={price_position} shape={shape_ctx['shape']} "
               f"level={sr_level_price} touches={sr_touch_count} "
               f"RVOL_20={rvol_20} RVOL_96={rvol_96} "
-              f"direction={setup_direction} entry={entry_price} sl={stop_loss}")
+              f"CONFUSION High={candle_high} Low={candle_low}")
     else:
-        ws.append_row([
+        awaiting_ws.append_row([
             pair,
             str(_to_utc_dt(candle_time)),
             candle_color,
@@ -457,58 +492,309 @@ def process_candle(pair, df, dry_run=False):
             shape_ctx.get("rejection_side") or "",
             candle_high,
             candle_low,
-            setup_direction,
-            entry_price,
-            stop_loss,
-            sl_distance_pct,
-            "PENDING",
+            "AWAITING_CONFIRMATION",
         ], table_range="A1")
 
-    print(f"  [sr_shape_tracker] {pair} qualified: {price_position} "
+    print(f"  [sr_shape_tracker] {pair} qualified for confirmation: {price_position} "
           f"(touched {sr_touch_count}x) | Shape=CONFUSION "
           f"({shape_ctx['strength']}, body={shape_ctx['body_pct']}%) | "
           f"RVOL_20={rvol_20} RVOL_96={rvol_96} (gate PASSED) | "
-          f"{setup_direction} entry={entry_price} SL={stop_loss} "
-          f"({sl_distance_pct}% away)")
+          f"High={candle_high} Low={candle_low} — waiting for next candle.")
 
-    # ---- CONFUSION bot ko Telegram alert (naya setup qualify hua) ----
-    setup_msg = _build_setup_message(
+    # ---- CONFUSION bot ko Telegram alert (awaiting confirmation) ----
+    awaiting_msg = _build_awaiting_message(
         pair, candle_time, price_position, sr_level_price, sr_touch_count,
-        shape_ctx, setup_direction, entry_price, stop_loss, sl_distance_pct,
-        rvol_20=rvol_20, rvol_96=rvol_96,
+        shape_ctx, candle_high, candle_low, rvol_20=rvol_20, rvol_96=rvol_96,
     )
     if dry_run:
-        print(f"  [sr_shape_tracker][DRY_RUN] Confusion Telegram (setup):\n{setup_msg}\n")
+        print(f"  [sr_shape_tracker][DRY_RUN] Confusion Telegram (awaiting):\n{awaiting_msg}\n")
     else:
         try:
-            send_confusion_telegram_message(setup_msg)
+            send_confusion_telegram_message(awaiting_msg)
         except Exception as e:
-            print(f"  [sr_shape_tracker] Confusion Telegram (setup) error: {e}")
+            print(f"  [sr_shape_tracker] Confusion Telegram (awaiting) error: {e}")
 
     return True
 
 
 # ============================================
+# STAGE 2: NEXT CANDLE se breakout direction CONFIRM karna
+# ============================================
+def resolve_confirmations(dry_run=False):
+    """
+    Confusion_Awaiting_Confirmation sheet mein har AWAITING_CONFIRMATION
+    row ke liye, us candle ke turant baad wali candle dhoondhta hai:
+        Next candle High > Confusion High         -> LONG
+        Next candle Low  < Confusion Low          -> SHORT
+        Dono break (ambiguous) ya koi nahi break  -> NO_CONFIRMATION
+    LONG/SHORT confirm hone par Confusion_Pending mein daal deta hai
+    (outcome-tracking ke liye). NO_CONFIRMATION seedha
+    Confusion_Backtest_Data mein blank-outcome row ke saath record ho
+    jaata hai (taaki pata chale kitni baar confirmation nahi milta).
+    """
+    awaiting_ws = _get_awaiting_worksheet()
+    records = awaiting_ws.get_all_records()
+    if not records:
+        print("  [sr_shape_tracker] Koi awaiting-confirmation candle nahi hai.")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    pairs_needed = {r["Pair"] for r in records if str(r.get("Status", "")).upper() == "AWAITING_CONFIRMATION"}
+    candle_cache = {}
+    for pair in pairs_needed:
+        try:
+            candle_cache[pair] = get_candles(pair=pair, resolution=RESOLUTION, days=2)
+        except Exception as e:
+            print(f"  [sr_shape_tracker] {pair} candles fetch error: {e}")
+            candle_cache[pair] = None
+
+    still_awaiting = []
+    confirmed_count = 0
+    no_confirmation_count = 0
+    discarded_count = 0
+
+    for row in records:
+        if str(row.get("Status", "")).upper() != "AWAITING_CONFIRMATION":
+            continue
+
+        pair = row["Pair"]
+        candle_time = _to_utc_dt(row["Candle_Time_UTC"])
+        confusion_high = float(row["Candle_High"])
+        confusion_low = float(row["Candle_Low"])
+        close = float(row["Close"])
+        rvol_20_raw = row.get("RVOL_20", "")
+        rvol_96_raw = row.get("RVOL_96", "")
+        rvol_20 = float(rvol_20_raw) if rvol_20_raw not in ("", None) else None
+        rvol_96 = float(rvol_96_raw) if rvol_96_raw not in ("", None) else None
+
+        if now_utc - candle_time > timedelta(hours=MAX_AGE_HOURS):
+            print(f"  [sr_shape_tracker] {pair} @ {row['Candle_Time_UTC']} stale (awaiting), discard.")
+            discarded_count += 1
+            continue
+
+        df = candle_cache.get(pair)
+        if df is None or df.empty:
+            still_awaiting.append(row)
+            continue
+
+        found_next, next_row = _find_next_candle(df, candle_time)
+        if not found_next:
+            still_awaiting.append(row)
+            continue
+
+        next_candle_time = next_row["Time"]
+        next_high = float(next_row["High"])
+        next_low = float(next_row["Low"])
+
+        broke_high = next_high > confusion_high
+        broke_low = next_low < confusion_low
+
+        if broke_high and broke_low:
+            # SAME-CANDLE AMBIGUITY (documented convention): dono breach
+            # ek hi candle mein hue, intrabar sequence OHLC se pata nahi
+            # chalti — conservatively ise NO_CONFIRMATION maana jaata
+            # hai (koi directional bias assume nahi karna).
+            break_direction = "NO_CONFIRMATION"
+        elif broke_high:
+            break_direction = "LONG"
+        elif broke_low:
+            break_direction = "SHORT"
+        else:
+            break_direction = "NO_CONFIRMATION"
+
+        common_fields = dict(
+            pair=pair,
+            candle_time_str=row["Candle_Time_UTC"],
+            candle_color=row["Candle_Color"],
+            close=close,
+            rvol_20=rvol_20,
+            rvol_96=rvol_96,
+            price_position=row.get("Price_Position", "UNKNOWN"),
+            sr_level_price=row.get("SR_Level_Price", ""),
+            sr_touch_count=row.get("SR_Touch_Count", 0),
+            candle_shape=row.get("Candle_Shape", "UNKNOWN"),
+            shape_strength=row.get("Shape_Strength", ""),
+            body_pct=row.get("Body_Pct", ""),
+            rejection_side=row.get("Rejection_Side", ""),
+            confusion_high=confusion_high,
+            confusion_low=confusion_low,
+            confusion_close=close,
+            next_candle_time_str=str(_to_utc_dt(next_candle_time)),
+            next_high=next_high,
+            next_low=next_low,
+        )
+
+        if break_direction == "NO_CONFIRMATION":
+            no_confirmation_count += 1
+            result_row = (
+                [common_fields["pair"], common_fields["candle_time_str"], common_fields["candle_color"],
+                 common_fields["close"], common_fields["rvol_20"] if common_fields["rvol_20"] is not None else "",
+                 common_fields["rvol_96"] if common_fields["rvol_96"] is not None else "",
+                 common_fields["price_position"], common_fields["sr_level_price"], common_fields["sr_touch_count"],
+                 common_fields["candle_shape"], common_fields["shape_strength"], common_fields["body_pct"],
+                 common_fields["rejection_side"], common_fields["confusion_high"], common_fields["confusion_low"],
+                 common_fields["confusion_close"], common_fields["next_candle_time_str"],
+                 common_fields["next_high"], common_fields["next_low"],
+                 "NO_CONFIRMATION", "", "", ""]
+                + [""] * len(HORIZONS_MINUTES)   # Price_After_*
+                + [""] * len(HORIZONS_MINUTES)   # PctChg_*
+                + ["", ""]                        # Max favorable/adverse
+                + [""] * len(HORIZONS_MINUTES)   # SL_Hit_*
+                + [""] * len(TARGET_RR)          # Target_*_Hit
+            )
+            if dry_run:
+                print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION: {pair} @ {row['Candle_Time_UTC']}")
+            else:
+                try:
+                    _get_results_worksheet().append_row(result_row, table_range="A1")
+                except Exception as e:
+                    print(f"  [sr_shape_tracker] NO_CONFIRMATION result likhne mein error: {e}")
+                    still_awaiting.append(row)
+                    continue
+                try:
+                    no_conf_msg = _build_no_confirmation_message(
+                        pair, candle_time, confusion_high, confusion_low,
+                        next_candle_time, next_high, next_low,
+                    )
+                    send_confusion_telegram_message(no_conf_msg)
+                except Exception as e:
+                    print(f"  [sr_shape_tracker] Confusion Telegram (no-confirmation) error: {e}")
+            continue  # awaiting list se hamesha ke liye hata do
+
+        # ---- LONG / SHORT confirmed -> Entry/SL nikaalo ----
+        if break_direction == "LONG":
+            entry_price = confusion_high
+            stop_loss = confusion_low
+            sl_distance_pct = round((entry_price - stop_loss) / entry_price * 100, 3)
+        else:  # SHORT
+            entry_price = confusion_low
+            stop_loss = confusion_high
+            sl_distance_pct = round((stop_loss - entry_price) / entry_price * 100, 3)
+
+        if sl_distance_pct <= 0:
+            # Degenerate case (confusion_high == confusion_low) — invalid, discard.
+            discarded_count += 1
+            continue
+
+        confirmed_count += 1
+        if dry_run:
+            print(f"  [sr_shape_tracker][DRY_RUN] {pair} CONFIRMED {break_direction}: "
+                  f"entry={entry_price} sl={stop_loss} ({sl_distance_pct}%) "
+                  f"next_candle_time={next_candle_time}")
+        else:
+            pending_ws = _get_pending_worksheet()
+            pending_ws.append_row([
+                pair,
+                row["Candle_Time_UTC"],
+                row["Candle_Color"],
+                close,
+                rvol_20 if rvol_20 is not None else "",
+                rvol_96 if rvol_96 is not None else "",
+                row.get("Price_Position", "UNKNOWN"),
+                row.get("SR_Level_Price", ""),
+                row.get("SR_Touch_Count", 0),
+                row.get("Candle_Shape", "UNKNOWN"),
+                row.get("Shape_Strength", ""),
+                row.get("Body_Pct", ""),
+                row.get("Rejection_Side", ""),
+                confusion_high,
+                confusion_low,
+                close,
+                str(_to_utc_dt(next_candle_time)),
+                next_high,
+                next_low,
+                break_direction,
+                entry_price,
+                stop_loss,
+                sl_distance_pct,
+                "PENDING",
+            ], table_range="A1")
+
+            try:
+                confirm_msg = _build_confirmation_message(
+                    pair, candle_time, break_direction, confusion_high, confusion_low,
+                    next_candle_time, next_high, next_low, entry_price, stop_loss,
+                    sl_distance_pct, rvol_20=rvol_20, rvol_96=rvol_96,
+                )
+                send_confusion_telegram_message(confirm_msg)
+            except Exception as e:
+                print(f"  [sr_shape_tracker] Confusion Telegram (confirmation) error: {e}")
+
+        print(f"  [sr_shape_tracker] {pair} breakout CONFIRMED: {break_direction} "
+              f"entry={entry_price} SL={stop_loss} ({sl_distance_pct}% away)")
+
+    # ---- Awaiting sheet ko sirf still-awaiting rows ke saath rewrite karo ----
+    if not dry_run:
+        try:
+            clean_rows = [[
+                r["Pair"], r["Candle_Time_UTC"], r["Candle_Color"], r["Close"],
+                r.get("RVOL_20", ""),
+                r.get("RVOL_96", ""),
+                r.get("Price_Position", "UNKNOWN"),
+                r.get("SR_Level_Price", ""),
+                r.get("SR_Touch_Count", 0),
+                r.get("Candle_Shape", "UNKNOWN"),
+                r.get("Shape_Strength", ""),
+                r.get("Body_Pct", ""),
+                r.get("Rejection_Side", ""),
+                r.get("Candle_High", ""),
+                r.get("Candle_Low", ""),
+                "AWAITING_CONFIRMATION",
+            ] for r in still_awaiting]
+            awaiting_ws.clear()
+            awaiting_ws.update([AWAITING_HEADER] + clean_rows)
+        except Exception as e:
+            print(f"  [sr_shape_tracker] Awaiting sheet update error: {e}")
+    else:
+        print(f"  [sr_shape_tracker][DRY_RUN] Still awaiting: {len(still_awaiting)}")
+
+    print(f"  [sr_shape_tracker] Confirmations: LONG/SHORT={confirmed_count} | "
+          f"NO_CONFIRMATION={no_confirmation_count} | "
+          f"Still awaiting: {len(still_awaiting)} | Discarded (stale/degenerate): {discarded_count}")
+
+
+# ============================================
 # TELEGRAM MESSAGE BUILDERS (Confusion bot)
 # ============================================
-def _build_setup_message(pair, candle_time, price_position, sr_level_price,
-                          sr_touch_count, shape_ctx, setup_direction,
-                          entry_price, stop_loss, sl_distance_pct,
-                          rvol_20=None, rvol_96=None):
-    """Naya CONFUSION setup qualify hote hi (pending mein add hote hi) bhejne wala message."""
-    direction_emoji = "🟢" if setup_direction == "LONG" else "🔴"
+def _build_awaiting_message(pair, candle_time, price_position, sr_level_price,
+                             sr_touch_count, shape_ctx, candle_high, candle_low,
+                             rvol_20=None, rvol_96=None):
+    """CONFUSION candle qualify hote hi (S/R+RVOL pass, awaiting-confirmation mein add hote hi) bhejne wala message."""
     rvol_line = (
         f"<b>RVOL_20:</b> {rvol_20 if rvol_20 is not None else 'N/A'}x | "
         f"<b>RVOL_96:</b> {rvol_96 if rvol_96 is not None else 'N/A'}x\n"
     )
     return (
-        f"🌀 <b>CONFUSION SETUP DETECTED (volume-confirmed)</b>\n\n"
+        f"🌀 <b>CONFUSION CANDLE — AWAITING CONFIRMATION</b>\n\n"
         f"<b>Pair:</b> {pair}\n"
         f"<b>Candle Time (IST):</b> {_to_ist_str(candle_time)}\n"
         f"{rvol_line}"
         f"<b>Price Position:</b> {price_position} (Level: {sr_level_price}, tested {sr_touch_count}x pehle)\n"
-        f"<b>Candle Shape:</b> CONFUSION ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)\n\n"
-        f"{direction_emoji} <b>Setup Direction:</b> {setup_direction}\n"
+        f"<b>Candle Shape:</b> CONFUSION ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)\n"
+        f"<b>Confusion High:</b> {candle_high} | <b>Confusion Low:</b> {candle_low}\n\n"
+        f"Next candle CONFUSION HIGH todhe -> LONG watch | LOW todhe -> SHORT watch. "
+        f"Ye sirf data-collection ke liye hai, trade instruction nahi."
+    )
+
+
+def _build_confirmation_message(pair, candle_time, break_direction, confusion_high,
+                                 confusion_low, next_candle_time, next_high, next_low,
+                                 entry_price, stop_loss, sl_distance_pct,
+                                 rvol_20=None, rvol_96=None):
+    """Next candle ne breakout confirm kar diya (LONG/SHORT) — us waqt bhejne wala message."""
+    direction_emoji = "🟢" if break_direction == "LONG" else "🔴"
+    rvol_line = (
+        f"<b>RVOL_20:</b> {rvol_20 if rvol_20 is not None else 'N/A'}x | "
+        f"<b>RVOL_96:</b> {rvol_96 if rvol_96 is not None else 'N/A'}x\n"
+    )
+    return (
+        f"{direction_emoji} <b>BREAKOUT CONFIRMED — {break_direction}</b>\n\n"
+        f"<b>Pair:</b> {pair}\n"
+        f"<b>Confusion Candle (IST):</b> {_to_ist_str(candle_time)}\n"
+        f"<b>Confusion High/Low:</b> {confusion_high} / {confusion_low}\n"
+        f"<b>Confirming Candle (IST):</b> {_to_ist_str(next_candle_time)}\n"
+        f"<b>Confirming Candle High/Low:</b> {next_high} / {next_low}\n"
+        f"{rvol_line}"
         f"<b>Entry:</b> {entry_price}\n"
         f"<b>Stop Loss:</b> {stop_loss} ({sl_distance_pct}% away)\n\n"
         f"Ye sirf data-collection/backtest ke liye hai, trade instruction nahi — "
@@ -516,7 +802,21 @@ def _build_setup_message(pair, candle_time, price_position, sr_level_price,
     )
 
 
-def _build_resolved_message(pair, candle_time, price_position, setup_direction,
+def _build_no_confirmation_message(pair, candle_time, confusion_high, confusion_low,
+                                    next_candle_time, next_high, next_low):
+    """Agli candle ne na HIGH na LOW break kiya (ya dono break kiya, ambiguous) — record-only message."""
+    return (
+        f"⚪ <b>NO CONFIRMATION</b>\n\n"
+        f"<b>Pair:</b> {pair}\n"
+        f"<b>Confusion Candle (IST):</b> {_to_ist_str(candle_time)}\n"
+        f"<b>Confusion High/Low:</b> {confusion_high} / {confusion_low}\n"
+        f"<b>Next Candle (IST):</b> {_to_ist_str(next_candle_time)}\n"
+        f"<b>Next Candle High/Low:</b> {next_high} / {next_low}\n\n"
+        f"Breakout confirm nahi hua — record kiya gaya, koi trade setup nahi."
+    )
+
+
+def _build_resolved_message(pair, candle_time, price_position, break_direction,
                              entry_price, stop_loss, outcome, pct_changes_by_horizon,
                              rvol_20=None, rvol_96=None):
     """120-min window fully resolve hone par (final outcome ke saath) bhejne wala message."""
@@ -544,7 +844,7 @@ def _build_resolved_message(pair, candle_time, price_position, setup_direction,
         f"<b>Candle Time (IST):</b> {_to_ist_str(candle_time)}\n"
         f"{rvol_line}"
         f"<b>Price Position:</b> {price_position}\n"
-        f"<b>Setup:</b> {setup_direction} | Entry: {entry_price} | SL: {stop_loss}\n\n"
+        f"<b>Break Direction:</b> {break_direction} | Entry: {entry_price} | SL: {stop_loss}\n\n"
         f"<b>Price % change by horizon:</b>\n{horizon_lines}\n\n"
         f"<b>SL Hit by horizon:</b>\n{sl_lines}\n\n"
         f"<b>Target Hit (R-multiples):</b>\n{targets_lines}\n\n"
@@ -555,23 +855,17 @@ def _build_resolved_message(pair, candle_time, price_position, setup_direction,
 
 
 # ============================================
-# v2 — SL / TARGET / MAX-MOVE ANALYSIS
+# SL / TARGET / MAX-MOVE ANALYSIS (unchanged logic, anchor time is now
+# the CONFIRMATION candle's time, not the confusion candle's time)
 # ============================================
-def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_loss):
+def _analyze_trade_outcome(df, anchor_time, break_direction, entry_price, stop_loss):
     """
-    Signal-candle ke baad, 120-min window ke andar (saari actual
-    candles use karke, sirf horizon-checkpoints nahi) SL aur target
-    (TARGET_RR multiples) HIGH/LOW se detect karta hai, plus max
-    favorable/adverse move.
-
-    Return: dict with keys:
-        "sl_hit_by": {15: bool, 30: bool, ...}   (cumulative — is
-                     horizon TAK SL hit hua tha ya nahi)
-        "target_hit": {rr: bool for rr in TARGET_RR}   (poori 120-min
-                     window mein target hit hua, SL usse pehle hit
-                     nahi hua)
-        "max_favorable_pct": float ya None
-        "max_adverse_pct": float ya None
+    Confirmation-candle (anchor) ke baad, 120-min window ke andar
+    (saari actual candles use karke) SL aur target (TARGET_RR
+    multiples) HIGH/LOW se detect karta hai, plus max favorable/adverse
+    move.
+    Return: dict with keys "sl_hit_by", "target_hit",
+            "max_favorable_pct", "max_adverse_pct".
     """
     max_horizon_min = max(HORIZONS_MINUTES)
     work_df = df.copy()
@@ -580,8 +874,8 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
         time_col = time_col.dt.tz_localize("UTC")
     work_df["_t"] = time_col
 
-    window_start = candle_time
-    window_end = candle_time + timedelta(minutes=max_horizon_min)
+    window_start = anchor_time
+    window_end = anchor_time + timedelta(minutes=max_horizon_min)
     window_df = work_df[(work_df["_t"] > window_start) & (work_df["_t"] <= window_end)]
     window_df = window_df.sort_values("_t")
 
@@ -596,7 +890,7 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
             "max_adverse_pct": None,
         }
 
-    is_long = (setup_direction == "LONG")
+    is_long = (break_direction == "LONG")
     if is_long:
         risk = entry_price - stop_loss
     else:
@@ -607,17 +901,14 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
 
     sl_hit_flag = False
     sl_hit_time = None
-    best_favorable_extreme = entry_price   # LONG: highest High so far; SHORT: lowest Low so far
-    worst_adverse_extreme = entry_price    # LONG: lowest Low so far; SHORT: highest High so far
+    best_favorable_extreme = entry_price
+    worst_adverse_extreme = entry_price
 
     for _, cand_row in window_df.iterrows():
         high = float(cand_row["High"])
         low = float(cand_row["Low"])
         cand_time = cand_row["_t"]
 
-        # ---- Max favorable / adverse tracking (SL hit hone ke baad bhi
-        # continue karta hai — yeh "agar hold karte" wala theoretical
-        # max move hai, trade management assumption nahi) ----
         if is_long:
             best_favorable_extreme = max(best_favorable_extreme, high)
             worst_adverse_extreme = min(worst_adverse_extreme, low)
@@ -625,10 +916,8 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
             best_favorable_extreme = min(best_favorable_extreme, low)
             worst_adverse_extreme = max(worst_adverse_extreme, high)
 
-        # ---- SL check (is candle mein SL breach hua?) ----
         sl_breached_this_candle = (low <= stop_loss) if is_long else (high >= stop_loss)
 
-        # ---- Target checks (is candle mein kaunse targets breach hue?) ----
         targets_breached_this_candle = set()
         for rr, target_price in targets.items():
             if target_hit[rr]:
@@ -638,26 +927,19 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
                 targets_breached_this_candle.add(rr)
 
         if not sl_hit_flag:
-            if sl_breached_this_candle and targets_breached_this_candle:
-                # SAME-CANDLE AMBIGUITY: dono ek hi candle mein hue —
-                # conservatively SL ko pehle maana jaata hai (documented
-                # assumption upar module docstring mein, koi
-                # profitability claim nahi).
-                sl_hit_flag = True
-                sl_hit_time = cand_time
-            elif sl_breached_this_candle:
+            if sl_breached_this_candle:
+                # SAME-CANDLE AMBIGUITY: SL conservatively pehle maana
+                # jaata hai (documented assumption, koi profitability
+                # claim nahi).
                 sl_hit_flag = True
                 sl_hit_time = cand_time
             elif targets_breached_this_candle:
                 for rr in targets_breached_this_candle:
                     target_hit[rr] = True
 
-        # agar sl_hit_flag pehle hi True ho chuka hai (pichli candle mein),
-        # to is candle ke targets count nahi honge — trade already
-        # stopped-out maana jaata hai.
         if sl_hit_flag and sl_hit_time is not None:
             for m in HORIZONS_MINUTES:
-                if sl_hit_time <= candle_time + timedelta(minutes=m):
+                if sl_hit_time <= anchor_time + timedelta(minutes=m):
                     sl_hit_by[m] = True
 
     if is_long:
@@ -676,19 +958,19 @@ def _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_l
 
 
 # ============================================
-# STEP 6: PENDING CANDLES RESOLVE KARNA
-#          (future 15/30/45/60/90/120 min outcome nikaalna)
+# STAGE 3: PENDING (confirmed) setups resolve karna
+#          (future 15/30/45/60/90/120 min outcome nikaalna, anchor =
+#           confirmation/next-candle ka time)
 # ============================================
 def resolve_pending(dry_run=False):
     pending_ws = _get_pending_worksheet()
     records = pending_ws.get_all_records()
     if not records:
-        print("  [sr_shape_tracker] Koi pending candle nahi hai.")
+        print("  [sr_shape_tracker] Koi pending (confirmed) candle nahi hai.")
         return
 
     now_utc = datetime.now(timezone.utc)
     max_horizon_candles = max(HORIZONS_CANDLES)
-
     pairs_needed = {r["Pair"] for r in records if str(r.get("Status", "")).upper() == "PENDING"}
     candle_cache = {}
     for pair in pairs_needed:
@@ -704,28 +986,25 @@ def resolve_pending(dry_run=False):
 
     for row in records:
         if str(row.get("Status", "")).upper() != "PENDING":
-            continue  # (is tab mein sirf PENDING rows honi chahiye, safety check)
+            continue
 
         pair = row["Pair"]
-        candle_time = _to_utc_dt(row["Candle_Time_UTC"])
+        # Anchor = confirmation (next) candle ka time — yehi actual
+        # "entry point" hai, isi se horizons count hote hain.
+        anchor_time = _to_utc_dt(row["Next_Candle_Time_UTC"])
         close = float(row["Close"])
-        setup_direction = row.get("Setup_Direction", "")
+        break_direction = row.get("Break_Direction", "")
         entry_price = float(row.get("Entry_Price", close) or close)
         stop_loss_raw = row.get("Stop_Loss", "")
         stop_loss = float(stop_loss_raw) if stop_loss_raw not in ("", None) else None
 
-        # RVOL values pending row se hi carry-forward karo (candle time
-        # pe jo the) — resolve() ke waqt firse recalculate nahi karte,
-        # kyunki candle purani ho chuki hoti hai aur rolling baseline
-        # thoda shift ho chuka hoga; jo signal-time pe record hua wahi
-        # authoritative hai.
         rvol_20_raw = row.get("RVOL_20", "")
         rvol_96_raw = row.get("RVOL_96", "")
         rvol_20 = float(rvol_20_raw) if rvol_20_raw not in ("", None) else None
         rvol_96 = float(rvol_96_raw) if rvol_96_raw not in ("", None) else None
 
-        if now_utc - candle_time > timedelta(hours=MAX_AGE_HOURS):
-            print(f"  [sr_shape_tracker] {pair} @ {row['Candle_Time_UTC']} stale, discard.")
+        if now_utc - anchor_time > timedelta(hours=MAX_AGE_HOURS):
+            print(f"  [sr_shape_tracker] {pair} @ {row['Next_Candle_Time_UTC']} stale (pending), discard.")
             discarded_count += 1
             continue
 
@@ -734,8 +1013,7 @@ def resolve_pending(dry_run=False):
             still_pending.append(row)
             continue
 
-        # Sabse dooriwala horizon (120 min) available hai tabhi fully resolve karo
-        max_target_time = candle_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon_candles)
+        max_target_time = anchor_time + timedelta(minutes=RESOLUTION_MINUTES * max_horizon_candles)
         found_max, _ = _find_closest_candle(df, max_target_time)
         if not found_max:
             still_pending.append(row)
@@ -755,23 +1033,29 @@ def resolve_pending(dry_run=False):
             row.get("Shape_Strength", ""),
             row.get("Body_Pct", ""),
             row.get("Rejection_Side", ""),
-            setup_direction,
+            row.get("Confusion_High", ""),
+            row.get("Confusion_Low", ""),
+            row.get("Confusion_Close", ""),
+            row.get("Next_Candle_Time_UTC", ""),
+            row.get("Next_Candle_High", ""),
+            row.get("Next_Candle_Low", ""),
+            break_direction,
             entry_price,
             stop_loss if stop_loss is not None else "",
             row.get("SL_Distance_Pct", ""),
         ]
 
-        # ---- 15/30/45/60/90/120 min Price/PctChg tracking (unchanged) ----
+        # ---- 15/30/45/60/90/120 min Price/PctChg tracking (anchor se) ----
         prices_after = []
         pct_changes = []
         all_found = True
         for n_candles in HORIZONS_CANDLES:
-            target_time = candle_time + timedelta(minutes=RESOLUTION_MINUTES * n_candles)
+            target_time = anchor_time + timedelta(minutes=RESOLUTION_MINUTES * n_candles)
             found, price = _find_closest_candle(df, target_time)
             if not found:
                 all_found = False
                 break
-            pct_change = round((price - close) / close * 100, 3)
+            pct_change = round((price - entry_price) / entry_price * 100, 3)
             prices_after.append(price)
             pct_changes.append(pct_change)
 
@@ -781,9 +1065,9 @@ def resolve_pending(dry_run=False):
 
         result_row += prices_after + pct_changes
 
-        # ---- v2: SL / Target / Max-move analysis ----
-        if setup_direction in ("LONG", "SHORT") and stop_loss is not None:
-            outcome = _analyze_trade_outcome(df, candle_time, setup_direction, entry_price, stop_loss)
+        # ---- SL / Target / Max-move analysis ----
+        if break_direction in ("LONG", "SHORT") and stop_loss is not None:
+            outcome = _analyze_trade_outcome(df, anchor_time, break_direction, entry_price, stop_loss)
             result_row.append(
                 outcome["max_favorable_pct"] if outcome["max_favorable_pct"] is not None else ""
             )
@@ -795,11 +1079,10 @@ def resolve_pending(dry_run=False):
             for rr in TARGET_RR:
                 result_row.append("YES" if outcome["target_hit"][rr] else "NO")
 
-            # ---- CONFUSION bot ko Telegram alert (final outcome resolve hua) ----
             pct_by_horizon = dict(zip(HORIZONS_MINUTES, pct_changes))
             resolved_msg = _build_resolved_message(
-                pair, candle_time, row.get("Price_Position", "UNKNOWN"),
-                setup_direction, entry_price, stop_loss, outcome, pct_by_horizon,
+                pair, anchor_time, row.get("Price_Position", "UNKNOWN"),
+                break_direction, entry_price, stop_loss, outcome, pct_by_horizon,
                 rvol_20=rvol_20, rvol_96=rvol_96,
             )
             if dry_run:
@@ -810,8 +1093,6 @@ def resolve_pending(dry_run=False):
                 except Exception as e:
                     print(f"  [sr_shape_tracker] Confusion Telegram (resolved) error: {e}")
         else:
-            # Setup direction/SL missing (theoretically nahi hona chahiye,
-            # safety fallback) — sab kuch blank/NO chhod do.
             result_row.append("")
             result_row.append("")
             for _ in HORIZONS_MINUTES:
@@ -844,9 +1125,13 @@ def resolve_pending(dry_run=False):
                 r.get("Shape_Strength", ""),
                 r.get("Body_Pct", ""),
                 r.get("Rejection_Side", ""),
-                r.get("Candle_High", ""),
-                r.get("Candle_Low", ""),
-                r.get("Setup_Direction", ""),
+                r.get("Confusion_High", ""),
+                r.get("Confusion_Low", ""),
+                r.get("Confusion_Close", ""),
+                r.get("Next_Candle_Time_UTC", ""),
+                r.get("Next_Candle_High", ""),
+                r.get("Next_Candle_Low", ""),
+                r.get("Break_Direction", ""),
                 r.get("Entry_Price", ""),
                 r.get("Stop_Loss", ""),
                 r.get("SL_Distance_Pct", ""),
@@ -868,9 +1153,10 @@ def resolve_pending(dry_run=False):
 # LOCAL TESTING
 # ============================================
 if __name__ == "__main__":
-    print("sr_shape_outcome_tracker — standalone test run")
+    print("sr_shape_outcome_tracker (v4) — standalone test run")
     print(f"Horizons: {HORIZONS_MINUTES} min => candles {HORIZONS_CANDLES}")
-    print(f"MIN_SR_TOUCHES = {MIN_SR_TOUCHES}")
+    print(f"MIN_SR_TOUCHES = {MIN_SR_TOUCHES} (soft floor, not a hard reliability filter)")
     print(f"RVOL gate: RVOL_20 >= {RVOL_SHORT_THRESHOLD} OR RVOL_96 >= {RVOL_LONG_THRESHOLD}")
     print(f"TARGET_RR = {TARGET_RR}")
+    resolve_confirmations(dry_run=True)
     resolve_pending(dry_run=True)

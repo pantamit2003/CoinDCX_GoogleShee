@@ -6,8 +6,32 @@ CHANGED (no longer S/R-position-based, ab NEXT-CANDLE breakout se
 confirm hoti hai). Purana v2/v3 wala "Support+CONFUSION=LONG" rule
 HATA diya gaya hai.
 
-YEH FLOWCHART IMPLEMENT KARTA HAI (v4):
+v4.1 — STATE-FLOW FIX (this revision):
+    NO_CONFIRMATION setups ab kabhi bhi Confusion_Pending mein reh
+    NAHI sakte aur kabhi bhi future candles mein dobara confirmation
+    ke liye "alive" nahi rehte. Confirmation SIRF immediately-next
+    candle par check hoti hai — agar woh candle High/Low dono todhe
+    ya kuch bhi na todhe, setup turant CLOSED ho jaata hai
+    (Confusion_Backtest_Data mein NO_CONFIRMATION record ho jaata
+    hai, research ke liye), aur resolve_pending() us tarah ke kisi
+    bhi row ko outcome-tracking ke liye kabhi process nahi karta —
+    ab yeh do jagah defensively enforce kiya gaya hai:
+        1. _find_next_candle() — STRICT index-based "immediately next
+           candle" lookup (pehle sirf time-tolerance based tha, jo
+           technically ek se zyada candles aage "match" kar sakta tha
+           agar data mein gaps/duplicates ho).
+        2. resolve_pending() — ab sirf un rows ko process/keep karta
+           hai jinka Status == "PENDING" AND Break_Direction is LONG
+           ya SHORT ho (_is_valid_pending() gate). Koi bhi invalid row
+           (galti se Awaiting/NO_CONFIRMATION jaisa kuch sheet mein aa
+           jaye) turant drop ho jaata hai aur sheet-rewrite mein bhi
+           carry forward nahi hota.
+    NO_CONFIRMATION rows hamesha history/backtest-data mein rehte hain
+    (research ke liye useful) — bas active Pending pool mein kabhi
+    nahi hote. Baaki sab (RVOL, S/R, Telegram, cooldown, independent
+    module architecture) UNCHANGED hai.
 
+YEH FLOWCHART IMPLEMENT KARTA HAI (v4):
     15-min candle
         |
     Kya price valid Support/Resistance ke paas hai? (touch_count >= MIN_SR_TOUCHES)
@@ -28,10 +52,11 @@ YEH FLOWCHART IMPLEMENT KARTA HAI (v4):
               CONFIRMATION" state mein daal do (abhi LONG/SHORT
               decide NAHI karna)
         |
-    Agla (next) 15-min candle kya karti hai?
+    IMMEDIATELY NEXT (aur SIRF immediately next) 15-min candle kya karti hai?
         CONFUSION HIGH break        -> LONG  (Entry = Confusion High, SL = Confusion Low)
         CONFUSION LOW break         -> SHORT (Entry = Confusion Low,  SL = Confusion High)
-        Neither break (ya dono break -> ambiguous) -> NO_CONFIRMATION (record karo, outcome tracking skip)
+        Neither break (ya dono break -> ambiguous) -> NO_CONFIRMATION
+             -> setup CLOSED (record ho jaata hai, dobara alive nahi rehta)
         |
     Confirm hone ke baad (LONG/SHORT), confirmation-candle ke time se
     next 15/30/45/60/90/120 min mein kya hua?
@@ -42,12 +67,12 @@ YEH FLOWCHART IMPLEMENT KARTA HAI (v4):
 
 MAIN OBJECTIVE (v4 — pure research phase):
     "S/R (chahe kam touches wale bhi) ke paas CONFUSION candle bane,
-    thoda relaxed RVOL ho, aur AGLI candle CONFUSION HIGH/LOW break
-    kare — to us breakout direction mein trade karne par historically
-    kya outcome aata hai?" Koi hard reliability assumption nahi —
-    sirf broad data collect karna hai taaki baad mein SR_Touch_Count,
-    RVOL range aur breakout-direction ke combinations ka asar analyze
-    ho sake.
+    thoda relaxed RVOL ho, aur AGLI (immediately next) candle
+    CONFUSION HIGH/LOW break kare — to us breakout direction mein
+    trade karne par historically kya outcome aata hai?" Koi hard
+    reliability assumption nahi — sirf broad data collect karna hai
+    taaki baad mein SR_Touch_Count, RVOL range aur breakout-direction
+    ke combinations ka asar analyze ho sake.
 
 KYA BADLA v3 -> v4 (IMPORTANT):
     1. MIN_SR_TOUCHES: 5 -> 2 (ab hard-cutoff nahi, sirf minimum
@@ -59,21 +84,27 @@ KYA BADLA v3 -> v4 (IMPORTANT):
     3. DIRECTION LOGIC BADLI: pehle "Support+CONFUSION=LONG,
        Resistance+CONFUSION=SHORT" tha (S/R position se direction).
        AB: S/R sirf ek "important level" identify karta hai, khud
-       direction decide NAHI karta. Direction ab NEXT candle ke
-       CONFUSION-candle HIGH/LOW breakout se confirm hoti hai:
+       direction decide NAHI karta. Direction ab IMMEDIATELY NEXT
+       candle ke CONFUSION-candle HIGH/LOW breakout se confirm hoti
+       hai:
            Next candle CONFUSION HIGH todhe -> LONG
            Next candle CONFUSION LOW todhe  -> SHORT
-           Dono ya koi nahi -> NO_CONFIRMATION (skip / record-only)
+           Dono ya koi nahi -> NO_CONFIRMATION -> CLOSED (skip / record-only)
     4. Isliye ab TWO-STAGE pending flow hai (naye sheet tabs):
            Confusion_Awaiting_Confirmation  — CONFUSION+SR+RVOL pass
-               hui candles, jo agli candle ka wait kar rahi hain.
+               hui candles, jo IMMEDIATELY AGLI candle ka wait kar
+               rahi hain (aur sirf usi ek candle ka — usse aage kabhi
+               nahi).
            Confusion_Pending                — jinka breakout confirm
                ho gaya (LONG/SHORT), ab 120-min outcome ka wait kar
                rahi hain.
            Confusion_Backtest_Data          — final results (LONG/
                SHORT ka pura outcome, aur NO_CONFIRMATION cases bhi
                blank-outcome ke saath record hote hain — taaki pata
-               chale kitni baar confirmation nahi milta).
+               chale kitni baar confirmation nahi milta). NO_CONFIRMATION
+               yahan history ke liye rehta hai, lekin Confusion_Pending
+               mein kabhi nahi jaata aur resolve_pending() kabhi is
+               tarah ki row ko process nahi karta.
 
 KYUN ALAG MODULE (unchanged):
     - backtest_tracker.py RVOL-spike TRIGGER se chalta hai, alag
@@ -84,20 +115,19 @@ KYUN ALAG MODULE (unchanged):
       karta. Sirf apne teen naye Google Sheet tabs use karta hai.
 
 SL / TARGET LOGIC (v4):
-    Break Direction = LONG  (next candle CONFUSION HIGH todhi)
+    Break Direction = LONG  (immediately next candle CONFUSION HIGH todhi)
         Entry = Confusion candle HIGH  (jahan breakout hua)
         SL    = Confusion candle LOW
         Risk  = Entry - SL
         Target_nR = Entry + n * Risk
-    Break Direction = SHORT (next candle CONFUSION LOW todhi)
+    Break Direction = SHORT (immediately next candle CONFUSION LOW todhi)
         Entry = Confusion candle LOW
         SL    = Confusion candle HIGH
         Risk  = SL - Entry
         Target_nR = Entry - n * Risk
-
     Outcome-horizons (15/30/45/60/90/120 min) ab CONFIRMATION candle
-    (next candle) ke time se count hote hain — kyunki wahi woh point
-    hai jahan actual entry milta.
+    (immediately next candle) ke time se count hote hain — kyunki
+    wahi woh point hai jahan actual entry milta.
 
     SAME-CANDLE AMBIGUITY (documented assumption, koi profitability
     claim nahi): agar ek hi future candle ke andar SL aur Target dono
@@ -105,7 +135,8 @@ SL / TARGET LOGIC (v4):
     SL pehle hit hua. Similarly agar confirmation-candle khud CONFUSION
     HIGH aur LOW dono break kare, to us candle ko ambiguous maankar
     NO_CONFIRMATION record kiya jaata hai (documented convention,
-    koi directional bias claim nahi).
+    koi directional bias claim nahi) — aur setup turant CLOSE ho
+    jaata hai, future candles mein dobara try nahi hota.
 
 VOLUME / RVOL (v4 — relaxed gate, unchanged formula):
     qualify (Stage 1) = (valid S/R ke paas, touches >= MIN_SR_TOUCHES)
@@ -166,7 +197,7 @@ RVOL_LONG_THRESHOLD = 2.0    # RVOL_96 is se upar -> volume-gate pass
 # Gate pass hone ke liye dono mein se sirf EK condition true honi chahiye (OR).
 
 MAX_AGE_HOURS = 6                 # itni der baad bhi resolve na ho paaye to discard
-MATCH_TOLERANCE_MINUTES = 7       # future-candle match karte waqt tolerance
+MATCH_TOLERANCE_MINUTES = 7       # future-candle match karte waqt tolerance (fallback path only)
 
 # Risk-reward multiples jinke target-hit backtest mein check karne hain
 TARGET_RR = [1, 1.5, 2, 3]
@@ -322,18 +353,42 @@ def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINU
 def _find_next_candle(df, candle_time, resolution_minutes=RESOLUTION_MINUTES,
                        tolerance_minutes=MATCH_TOLERANCE_MINUTES):
     """
-    CONFUSION candle ke turant baad wali (agli) 15-min candle dhoondta
-    hai — candle_time se strictly baad, aur candle_time + resolution
-    ke sabse kareeb honi chahiye (tolerance ke andar).
+    STRICT "immediately next candle only" lookup (v4.1 fix).
+
+    Primary path: find candle_time's row by EXACT match in df, then
+    take the very next row by dataframe position (idx + 1). This is
+    the true "immediately next candle" — it can never accidentally
+    skip ahead by more than one candle, even if there are timestamp
+    gaps or duplicate rows elsewhere in df.
+
+    Fallback path: if candle_time itself isn't present in df (e.g. it
+    scrolled out of the fetch window before we got to resolve it), we
+    fall back to a tolerance-based time match — but still capped so it
+    can only match a candle at approximately one resolution-step
+    ahead, never further into the future.
+
     Return: (found: bool, row: pandas.Series or None)
     """
     df_times = df["Time"]
     if df_times.dt.tz is None:
         df_times = df_times.dt.tz_localize("UTC")
+
+    exact_mask = df_times == candle_time
+    if exact_mask.any():
+        exact_idx = df.index[exact_mask][0]
+        pos = df.index.get_loc(exact_idx)
+        if pos + 1 < len(df):
+            return True, df.iloc[pos + 1]
+        # candle_time is the last candle we currently have — the
+        # immediately-next candle hasn't printed yet, keep waiting.
+        return False, None
+
+    # Fallback: candle_time not found exactly in this df fetch.
+    # Still only look for a candle at ~one resolution-step ahead.
     target_time = candle_time + timedelta(minutes=resolution_minutes)
     diffs = (df_times - target_time).abs()
     within_tolerance_mask = diffs <= timedelta(minutes=tolerance_minutes)
-    after_signal_mask = df_times > candle_time
+    after_signal_mask = (df_times > candle_time) & (df_times <= target_time + timedelta(minutes=tolerance_minutes))
     candidate_mask = within_tolerance_mask & after_signal_mask
     if not candidate_mask.any():
         return False, None
@@ -347,6 +402,21 @@ def _is_pair_already_active(records, pair, status_field="Status", active_values=
         if r.get("Pair") == pair and str(r.get(status_field, "")).upper() in active_values:
             return True
     return False
+
+
+def _is_valid_pending_row(row):
+    """
+    v4.1 defensive gate: a row in Confusion_Pending is only eligible
+    for outcome tracking if it is genuinely a CONFIRMED (LONG/SHORT)
+    setup. This protects resolve_pending() against ever processing a
+    NO_CONFIRMATION / awaiting / malformed row — even if one somehow
+    ends up in this sheet (manual edit, partial write, future bug
+    elsewhere). NO_CONFIRMATION setups must never be treated as
+    "active pending."
+    """
+    status_ok = str(row.get("Status", "")).upper() == "PENDING"
+    direction_ok = str(row.get("Break_Direction", "")).upper() in ("LONG", "SHORT")
+    return status_ok and direction_ok
 
 
 # ============================================
@@ -391,11 +461,14 @@ def process_candle(pair, df, dry_run=False):
         15-min candle -> valid S/R ke paas? -> shape classify ->
         SIRF CONFUSION -> RVOL gate pass? -> High/Low record karke
         AWAITING_CONFIRMATION mein daal do.
+
     DIRECTION YAHAN DECIDE NAHI HOTI (v4 change) — woh
-    resolve_confirmations() next candle dekhkar karega.
+    resolve_confirmations() IMMEDIATELY NEXT candle dekhkar karega,
+    aur sirf usi ek candle ka wait hota hai (v4.1).
 
     df: candle dataframe (kam se kam SR_LOOKBACK+ candles chahiye,
         columns: Time/Open/High/Low/Close/Volume)
+
     Return: True agar candle qualify hoke awaiting-confirmation mein
             add hui, False agar skip hui.
     """
@@ -462,6 +535,7 @@ def process_candle(pair, df, dry_run=False):
     if _is_pair_already_active(existing_awaiting, pair, active_values=("AWAITING_CONFIRMATION",)):
         print(f"  [sr_shape_tracker] {pair} already awaiting confirmation — skip.")
         return False
+
     pending_ws = _get_pending_worksheet()
     existing_pending = pending_ws.get_all_records()
     if _is_pair_already_active(existing_pending, pair, active_values=("PENDING",)):
@@ -499,7 +573,7 @@ def process_candle(pair, df, dry_run=False):
           f"(touched {sr_touch_count}x) | Shape=CONFUSION "
           f"({shape_ctx['strength']}, body={shape_ctx['body_pct']}%) | "
           f"RVOL_20={rvol_20} RVOL_96={rvol_96} (gate PASSED) | "
-          f"High={candle_high} Low={candle_low} — waiting for next candle.")
+          f"High={candle_high} Low={candle_low} — waiting for immediately-next candle.")
 
     # ---- CONFUSION bot ko Telegram alert (awaiting confirmation) ----
     awaiting_msg = _build_awaiting_message(
@@ -518,19 +592,27 @@ def process_candle(pair, df, dry_run=False):
 
 
 # ============================================
-# STAGE 2: NEXT CANDLE se breakout direction CONFIRM karna
+# STAGE 2: IMMEDIATELY NEXT CANDLE se breakout direction CONFIRM karna
 # ============================================
 def resolve_confirmations(dry_run=False):
     """
     Confusion_Awaiting_Confirmation sheet mein har AWAITING_CONFIRMATION
-    row ke liye, us candle ke turant baad wali candle dhoondhta hai:
+    row ke liye, us candle ke IMMEDIATELY BAAD wali (aur sirf usi) candle
+    dhoondhta hai:
         Next candle High > Confusion High         -> LONG
         Next candle Low  < Confusion Low          -> SHORT
         Dono break (ambiguous) ya koi nahi break  -> NO_CONFIRMATION
+
     LONG/SHORT confirm hone par Confusion_Pending mein daal deta hai
-    (outcome-tracking ke liye). NO_CONFIRMATION seedha
-    Confusion_Backtest_Data mein blank-outcome row ke saath record ho
-    jaata hai (taaki pata chale kitni baar confirmation nahi milta).
+    (outcome-tracking ke liye).
+
+    NO_CONFIRMATION seedha Confusion_Backtest_Data mein blank-outcome
+    row ke saath record ho jaata hai (taaki pata chale kitni baar
+    confirmation nahi milta), aur us candle ko is function ke baad
+    kabhi dobara process NAHI kiya jaata — Status "AWAITING_CONFIRMATION"
+    wapas nahi likha jaata, is liye woh row still_awaiting list mein
+    (aur isliye agli baar ke awaiting-sheet rewrite mein) kabhi nahi
+    aati. Setup permanently CLOSED ho jaata hai (v4.1).
     """
     awaiting_ws = _get_awaiting_worksheet()
     records = awaiting_ws.get_all_records()
@@ -540,6 +622,7 @@ def resolve_confirmations(dry_run=False):
 
     now_utc = datetime.now(timezone.utc)
     pairs_needed = {r["Pair"] for r in records if str(r.get("Status", "")).upper() == "AWAITING_CONFIRMATION"}
+
     candle_cache = {}
     for pair in pairs_needed:
         try:
@@ -577,6 +660,10 @@ def resolve_confirmations(dry_run=False):
             still_awaiting.append(row)
             continue
 
+        # STRICT: sirf immediately-next candle dhoondhta hai (v4.1 fix
+        # inside _find_next_candle). Agar woh candle abhi print nahi
+        # hui, to still_awaiting mein rakho — future candles ko kabhi
+        # "next" maan kar skip nahi karega.
         found_next, next_row = _find_next_candle(df, candle_time)
         if not found_next:
             still_awaiting.append(row)
@@ -625,6 +712,10 @@ def resolve_confirmations(dry_run=False):
         )
 
         if break_direction == "NO_CONFIRMATION":
+            # ---- v4.1: setup CLOSED — history mein jaata hai, active
+            # pending mein kabhi nahi. Yeh row still_awaiting mein bhi
+            # NAHI daali jaati, is liye awaiting-sheet rewrite ke baad
+            # yeh permanently gayab ho jaati hai. ----
             no_confirmation_count += 1
             result_row = (
                 [common_fields["pair"], common_fields["candle_time_str"], common_fields["candle_color"],
@@ -643,12 +734,18 @@ def resolve_confirmations(dry_run=False):
                 + [""] * len(TARGET_RR)          # Target_*_Hit
             )
             if dry_run:
-                print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION: {pair} @ {row['Candle_Time_UTC']}")
+                print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION (CLOSED): {pair} @ {row['Candle_Time_UTC']}")
             else:
                 try:
                     _get_results_worksheet().append_row(result_row, table_range="A1")
                 except Exception as e:
                     print(f"  [sr_shape_tracker] NO_CONFIRMATION result likhne mein error: {e}")
+                    # Sheet-write fail hui — is candle ko permanently
+                    # discard karne ke bajaye ek retry ka mauka dena
+                    # zyada safe hai, is liye ise still_awaiting mein
+                    # daal do (agli run mein dobara try hoga, lekin
+                    # phir bhi sirf usi immediately-next candle ke
+                    # against — koi state leak nahi).
                     still_awaiting.append(row)
                     continue
                 try:
@@ -659,7 +756,7 @@ def resolve_confirmations(dry_run=False):
                     send_confusion_telegram_message(no_conf_msg)
                 except Exception as e:
                     print(f"  [sr_shape_tracker] Confusion Telegram (no-confirmation) error: {e}")
-            continue  # awaiting list se hamesha ke liye hata do
+            continue  # awaiting list se hamesha ke liye hata do — setup CLOSED
 
         # ---- LONG / SHORT confirmed -> Entry/SL nikaalo ----
         if break_direction == "LONG":
@@ -677,6 +774,7 @@ def resolve_confirmations(dry_run=False):
             continue
 
         confirmed_count += 1
+
         if dry_run:
             print(f"  [sr_shape_tracker][DRY_RUN] {pair} CONFIRMED {break_direction}: "
                   f"entry={entry_price} sl={stop_loss} ({sl_distance_pct}%) "
@@ -709,7 +807,6 @@ def resolve_confirmations(dry_run=False):
                 sl_distance_pct,
                 "PENDING",
             ], table_range="A1")
-
             try:
                 confirm_msg = _build_confirmation_message(
                     pair, candle_time, break_direction, confusion_high, confusion_low,
@@ -724,6 +821,8 @@ def resolve_confirmations(dry_run=False):
               f"entry={entry_price} SL={stop_loss} ({sl_distance_pct}% away)")
 
     # ---- Awaiting sheet ko sirf still-awaiting rows ke saath rewrite karo ----
+    # (NO_CONFIRMATION aur confirmed rows dono is list mein kabhi
+    # nahi aate — is liye woh yahan se permanently gayab ho jaate hain.)
     if not dry_run:
         try:
             clean_rows = [[
@@ -749,8 +848,9 @@ def resolve_confirmations(dry_run=False):
         print(f"  [sr_shape_tracker][DRY_RUN] Still awaiting: {len(still_awaiting)}")
 
     print(f"  [sr_shape_tracker] Confirmations: LONG/SHORT={confirmed_count} | "
-          f"NO_CONFIRMATION={no_confirmation_count} | "
-          f"Still awaiting: {len(still_awaiting)} | Discarded (stale/degenerate): {discarded_count}")
+          f"NO_CONFIRMATION(closed)={no_confirmation_count} | "
+          f"Still awaiting (immediately-next candle not yet printed): {len(still_awaiting)} | "
+          f"Discarded (stale/degenerate): {discarded_count}")
 
 
 # ============================================
@@ -772,8 +872,8 @@ def _build_awaiting_message(pair, candle_time, price_position, sr_level_price,
         f"<b>Price Position:</b> {price_position} (Level: {sr_level_price}, tested {sr_touch_count}x pehle)\n"
         f"<b>Candle Shape:</b> CONFUSION ({shape_ctx['strength']}, body={shape_ctx['body_pct']}%)\n"
         f"<b>Confusion High:</b> {candle_high} | <b>Confusion Low:</b> {candle_low}\n\n"
-        f"Next candle CONFUSION HIGH todhe -> LONG watch | LOW todhe -> SHORT watch. "
-        f"Ye sirf data-collection ke liye hai, trade instruction nahi."
+        f"Immediately next candle CONFUSION HIGH todhe -> LONG watch | LOW todhe -> SHORT watch. "
+        f"Confirm na ho to setup close ho jaata hai. Ye sirf data-collection ke liye hai, trade instruction nahi."
     )
 
 
@@ -781,7 +881,7 @@ def _build_confirmation_message(pair, candle_time, break_direction, confusion_hi
                                  confusion_low, next_candle_time, next_high, next_low,
                                  entry_price, stop_loss, sl_distance_pct,
                                  rvol_20=None, rvol_96=None):
-    """Next candle ne breakout confirm kar diya (LONG/SHORT) — us waqt bhejne wala message."""
+    """Immediately next candle ne breakout confirm kar diya (LONG/SHORT) — us waqt bhejne wala message."""
     direction_emoji = "🟢" if break_direction == "LONG" else "🔴"
     rvol_line = (
         f"<b>RVOL_20:</b> {rvol_20 if rvol_20 is not None else 'N/A'}x | "
@@ -804,15 +904,16 @@ def _build_confirmation_message(pair, candle_time, break_direction, confusion_hi
 
 def _build_no_confirmation_message(pair, candle_time, confusion_high, confusion_low,
                                     next_candle_time, next_high, next_low):
-    """Agli candle ne na HIGH na LOW break kiya (ya dono break kiya, ambiguous) — record-only message."""
+    """Immediately-next candle ne na HIGH na LOW break kiya (ya dono break kiya, ambiguous) — setup CLOSED, record-only message."""
     return (
-        f"⚪ <b>NO CONFIRMATION</b>\n\n"
+        f"⚪ <b>NO CONFIRMATION — SETUP CLOSED</b>\n\n"
         f"<b>Pair:</b> {pair}\n"
         f"<b>Confusion Candle (IST):</b> {_to_ist_str(candle_time)}\n"
         f"<b>Confusion High/Low:</b> {confusion_high} / {confusion_low}\n"
-        f"<b>Next Candle (IST):</b> {_to_ist_str(next_candle_time)}\n"
+        f"<b>Immediately Next Candle (IST):</b> {_to_ist_str(next_candle_time)}\n"
         f"<b>Next Candle High/Low:</b> {next_high} / {next_low}\n\n"
-        f"Breakout confirm nahi hua — record kiya gaya, koi trade setup nahi."
+        f"Breakout confirm nahi hua — setup permanently close, record kiya gaya, "
+        f"koi trade setup nahi, future candles mein dobara try nahi hoga."
     )
 
 
@@ -864,6 +965,7 @@ def _analyze_trade_outcome(df, anchor_time, break_direction, entry_price, stop_l
     (saari actual candles use karke) SL aur target (TARGET_RR
     multiples) HIGH/LOW se detect karta hai, plus max favorable/adverse
     move.
+
     Return: dict with keys "sl_hit_by", "target_hit",
             "max_favorable_pct", "max_adverse_pct".
     """
@@ -961,6 +1063,12 @@ def _analyze_trade_outcome(df, anchor_time, break_direction, entry_price, stop_l
 # STAGE 3: PENDING (confirmed) setups resolve karna
 #          (future 15/30/45/60/90/120 min outcome nikaalna, anchor =
 #           confirmation/next-candle ka time)
+#
+# v4.1: ab yeh function SIRF genuinely-confirmed (Status == "PENDING"
+# AND Break_Direction in LONG/SHORT) rows ko process karta hai. Koi
+# bhi row jo is shape ko satisfy nahi karti (NO_CONFIRMATION,
+# awaiting, malformed) turant drop kar di jaati hai aur agli sheet-
+# rewrite mein bhi carry forward nahi hoti.
 # ============================================
 def resolve_pending(dry_run=False):
     pending_ws = _get_pending_worksheet()
@@ -971,7 +1079,24 @@ def resolve_pending(dry_run=False):
 
     now_utc = datetime.now(timezone.utc)
     max_horizon_candles = max(HORIZONS_CANDLES)
-    pairs_needed = {r["Pair"] for r in records if str(r.get("Status", "")).upper() == "PENDING"}
+
+    # ---- v4.1 DEFENSIVE GATE ----
+    # Sirf woh rows eligible hain jinka Status == "PENDING" aur
+    # Break_Direction genuinely LONG/SHORT ho. Anything else (e.g. a
+    # NO_CONFIRMATION row that should never be here, or a row with a
+    # blank/garbage direction) is logged and permanently dropped —
+    # never treated as "active pending."
+    invalid_rows = [
+        r for r in records
+        if str(r.get("Status", "")).upper() == "PENDING" and not _is_valid_pending_row(r)
+    ]
+    for r in invalid_rows:
+        print(f"  [sr_shape_tracker] WARNING: {r.get('Pair')} @ {r.get('Candle_Time_UTC')} "
+              f"found in Confusion_Pending with invalid Break_Direction="
+              f"{r.get('Break_Direction')!r} — dropping, NOT tracking outcome for it.")
+
+    pairs_needed = {r["Pair"] for r in records if _is_valid_pending_row(r)}
+
     candle_cache = {}
     for pair in pairs_needed:
         try:
@@ -985,7 +1110,11 @@ def resolve_pending(dry_run=False):
     discarded_count = 0
 
     for row in records:
-        if str(row.get("Status", "")).upper() != "PENDING":
+        # v4.1: hard gate — sirf valid confirmed rows aage badhte hain.
+        # Invalid rows (already logged above) yahin permanently drop
+        # ho jaati hain — still_pending mein bhi nahi jaatin, is liye
+        # sheet-rewrite ke baad woh gayab ho jaayengi.
+        if not _is_valid_pending_row(row):
             continue
 
         pair = row["Pair"]
@@ -997,7 +1126,6 @@ def resolve_pending(dry_run=False):
         entry_price = float(row.get("Entry_Price", close) or close)
         stop_loss_raw = row.get("Stop_Loss", "")
         stop_loss = float(stop_loss_raw) if stop_loss_raw not in ("", None) else None
-
         rvol_20_raw = row.get("RVOL_20", "")
         rvol_96_raw = row.get("RVOL_96", "")
         rvol_20 = float(rvol_20_raw) if rvol_20_raw not in ("", None) else None
@@ -1066,39 +1194,32 @@ def resolve_pending(dry_run=False):
         result_row += prices_after + pct_changes
 
         # ---- SL / Target / Max-move analysis ----
-        if break_direction in ("LONG", "SHORT") and stop_loss is not None:
-            outcome = _analyze_trade_outcome(df, anchor_time, break_direction, entry_price, stop_loss)
-            result_row.append(
-                outcome["max_favorable_pct"] if outcome["max_favorable_pct"] is not None else ""
-            )
-            result_row.append(
-                outcome["max_adverse_pct"] if outcome["max_adverse_pct"] is not None else ""
-            )
-            for m in HORIZONS_MINUTES:
-                result_row.append("YES" if outcome["sl_hit_by"][m] else "NO")
-            for rr in TARGET_RR:
-                result_row.append("YES" if outcome["target_hit"][rr] else "NO")
+        # (break_direction guaranteed LONG/SHORT here by _is_valid_pending_row gate)
+        outcome = _analyze_trade_outcome(df, anchor_time, break_direction, entry_price, stop_loss)
+        result_row.append(
+            outcome["max_favorable_pct"] if outcome["max_favorable_pct"] is not None else ""
+        )
+        result_row.append(
+            outcome["max_adverse_pct"] if outcome["max_adverse_pct"] is not None else ""
+        )
+        for m in HORIZONS_MINUTES:
+            result_row.append("YES" if outcome["sl_hit_by"][m] else "NO")
+        for rr in TARGET_RR:
+            result_row.append("YES" if outcome["target_hit"][rr] else "NO")
 
-            pct_by_horizon = dict(zip(HORIZONS_MINUTES, pct_changes))
-            resolved_msg = _build_resolved_message(
-                pair, anchor_time, row.get("Price_Position", "UNKNOWN"),
-                break_direction, entry_price, stop_loss, outcome, pct_by_horizon,
-                rvol_20=rvol_20, rvol_96=rvol_96,
-            )
-            if dry_run:
-                print(f"  [sr_shape_tracker][DRY_RUN] Confusion Telegram (resolved):\n{resolved_msg}\n")
-            else:
-                try:
-                    send_confusion_telegram_message(resolved_msg)
-                except Exception as e:
-                    print(f"  [sr_shape_tracker] Confusion Telegram (resolved) error: {e}")
+        pct_by_horizon = dict(zip(HORIZONS_MINUTES, pct_changes))
+        resolved_msg = _build_resolved_message(
+            pair, anchor_time, row.get("Price_Position", "UNKNOWN"),
+            break_direction, entry_price, stop_loss, outcome, pct_by_horizon,
+            rvol_20=rvol_20, rvol_96=rvol_96,
+        )
+        if dry_run:
+            print(f"  [sr_shape_tracker][DRY_RUN] Confusion Telegram (resolved):\n{resolved_msg}\n")
         else:
-            result_row.append("")
-            result_row.append("")
-            for _ in HORIZONS_MINUTES:
-                result_row.append("")
-            for _ in TARGET_RR:
-                result_row.append("")
+            try:
+                send_confusion_telegram_message(resolved_msg)
+            except Exception as e:
+                print(f"  [sr_shape_tracker] Confusion Telegram (resolved) error: {e}")
 
         if dry_run:
             print(f"  [sr_shape_tracker][DRY_RUN] RESOLVED: {result_row}")
@@ -1114,6 +1235,10 @@ def resolve_pending(dry_run=False):
 
     if not dry_run:
         try:
+            # v4.1: still_pending sirf valid rows se ban sakti hai
+            # (invalid rows loop ke shuru mein hi `continue` ho jaati
+            # hain, kabhi append nahi hotin) — is liye rewrite apne aap
+            # invalid/NO_CONFIRMATION-jaisi rows ko purge kar deta hai.
             clean_rows = [[
                 r["Pair"], r["Candle_Time_UTC"], r["Candle_Color"], r["Close"],
                 r.get("RVOL_20", ""),
@@ -1146,14 +1271,15 @@ def resolve_pending(dry_run=False):
 
     print(f"  [sr_shape_tracker] Resolved: {resolved_count} | "
           f"Still pending: {len(still_pending)} | "
-          f"Discarded (stale): {discarded_count}")
+          f"Discarded (stale): {discarded_count} | "
+          f"Invalid rows dropped (never tracked): {len(invalid_rows)}")
 
 
 # ============================================
 # LOCAL TESTING
 # ============================================
 if __name__ == "__main__":
-    print("sr_shape_outcome_tracker (v4) — standalone test run")
+    print("sr_shape_outcome_tracker (v4.1) — standalone test run")
     print(f"Horizons: {HORIZONS_MINUTES} min => candles {HORIZONS_CANDLES}")
     print(f"MIN_SR_TOUCHES = {MIN_SR_TOUCHES} (soft floor, not a hard reliability filter)")
     print(f"RVOL gate: RVOL_20 >= {RVOL_SHORT_THRESHOLD} OR RVOL_96 >= {RVOL_LONG_THRESHOLD}")

@@ -1487,6 +1487,10 @@ def _near_resistance(row):
     return row.get("Price_Position") == "NEAR_RESISTANCE"
 
 
+def _near_support(row):
+    return row.get("Price_Position") == "NEAR_SUPPORT"
+
+
 def generate_backtest_summary(v_filters=True):
     """
     NAYA (v4.2) — READ-ONLY summary function.
@@ -1525,6 +1529,18 @@ def generate_backtest_summary(v_filters=True):
     _print_stats_block(v1_rows, "V1: + Touch 2-3 + Body <20%")
     _print_stats_block(v2_rows, "V2: + Body <20% (no touch filter)")
     _print_stats_block(v3_rows, "V3: + Touch 2-3 (no body filter)")
+
+    # ---- NAYA: V4/V5/V6 — same conditions, NEAR_SUPPORT ke against ----
+    v4_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _body_lt_20(r) and _near_support(r)]
+    v5_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _body_lt_20(r) and _near_support(r)]
+    v6_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _near_support(r)]
+
+    print("\n" + "=" * 60)
+    print("STRATEGY VARIANTS (base: RVOL20 2-3 + NEAR_SUPPORT)")
+    print("=" * 60)
+    _print_stats_block(v4_rows, "V4: + Touch 2-3 + Body <20%")
+    _print_stats_block(v5_rows, "V5: + Body <20% (no touch filter)")
+    _print_stats_block(v6_rows, "V6: + Touch 2-3 (no body filter)")
 
 
 # ============================================
@@ -1586,6 +1602,9 @@ def generate_strategy_report_sheet(include_raw_rows=True, dry_run=False):
     V1: RVOL20 2-3 + Touch 2-3 + Body <20% + NEAR_RESISTANCE
     V2: RVOL20 2-3 + Body <20% + NEAR_RESISTANCE
     V3: RVOL20 2-3 + Touch 2-3 + NEAR_RESISTANCE
+    V4: RVOL20 2-3 + Touch 2-3 + Body <20% + NEAR_SUPPORT   (NAYA)
+    V5: RVOL20 2-3 + Body <20% + NEAR_SUPPORT               (NAYA)
+    V6: RVOL20 2-3 + Touch 2-3 + NEAR_SUPPORT               (NAYA)
 
     IMPORTANT: Yeh function Confusion_Backtest_Data se sirf PADHTA hai
     (read-only) — existing tracking flow (process_candle /
@@ -1616,10 +1635,17 @@ def generate_strategy_report_sheet(include_raw_rows=True, dry_run=False):
     v1_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _body_lt_20(r) and _near_resistance(r)]
     v2_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _body_lt_20(r) and _near_resistance(r)]
     v3_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _near_resistance(r)]
+    # ---- NAYA: V4/V5/V6 — same conditions, NEAR_SUPPORT ke against ----
+    v4_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _body_lt_20(r) and _near_support(r)]
+    v5_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _body_lt_20(r) and _near_support(r)]
+    v6_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _near_support(r)]
 
-    v1_stats = _print_stats_block(v1_rows, "V1: + Touch 2-3 + Body <20%")
-    v2_stats = _print_stats_block(v2_rows, "V2: + Body <20% (no touch filter)")
-    v3_stats = _print_stats_block(v3_rows, "V3: + Touch 2-3 (no body filter)")
+    v1_stats = _print_stats_block(v1_rows, "V1: + Touch 2-3 + Body <20% (NEAR_RESISTANCE)")
+    v2_stats = _print_stats_block(v2_rows, "V2: + Body <20% (NEAR_RESISTANCE)")
+    v3_stats = _print_stats_block(v3_rows, "V3: + Touch 2-3 (NEAR_RESISTANCE)")
+    v4_stats = _print_stats_block(v4_rows, "V4: + Touch 2-3 + Body <20% (NEAR_SUPPORT)")
+    v5_stats = _print_stats_block(v5_rows, "V5: + Body <20% (NEAR_SUPPORT)")
+    v6_stats = _print_stats_block(v6_rows, "V6: + Touch 2-3 (NEAR_SUPPORT)")
 
     sheet_rows = []
     sheet_rows.append(["--- SUMMARY ---"])
@@ -1627,26 +1653,34 @@ def generate_strategy_report_sheet(include_raw_rows=True, dry_run=False):
     sheet_rows.append(_stats_row_for_sheet("V1", v1_stats))
     sheet_rows.append(_stats_row_for_sheet("V2", v2_stats))
     sheet_rows.append(_stats_row_for_sheet("V3", v3_stats))
+    sheet_rows.append(_stats_row_for_sheet("V4", v4_stats))
+    sheet_rows.append(_stats_row_for_sheet("V5", v5_stats))
+    sheet_rows.append(_stats_row_for_sheet("V6", v6_stats))
     sheet_rows.append([])
 
     if include_raw_rows:
         sheet_rows.append(["--- MATCHING SETUPS (RAW ROWS) ---"])
         sheet_rows.append(STRATEGY_REPORT_ROW_HEADER)
-        for label, rows in (("V1", v1_rows), ("V2", v2_rows), ("V3", v3_rows)):
+        for label, rows in (
+            ("V1", v1_rows), ("V2", v2_rows), ("V3", v3_rows),
+            ("V4", v4_rows), ("V5", v5_rows), ("V6", v6_rows),
+        ):
             for r in rows:
                 row_values = ["" if r.get(col, "") is None else r.get(col, "") for col in RESULTS_HEADER]
                 sheet_rows.append([label] + row_values)
 
     if dry_run:
         print(f"  [sr_shape_tracker][DRY_RUN] Strategy report sheet mein {len(sheet_rows)} rows likhta "
-              f"(V1={len(v1_rows)}, V2={len(v2_rows)}, V3={len(v3_rows)} matching setups).")
+              f"(V1={len(v1_rows)}, V2={len(v2_rows)}, V3={len(v3_rows)}, "
+              f"V4={len(v4_rows)}, V5={len(v5_rows)}, V6={len(v6_rows)} matching setups).")
         return
 
     ws = _get_strategy_report_worksheet()
     ws.clear()
     ws.update("A1", sheet_rows)
     print(f"  [sr_shape_tracker] Confusion_Strategy_Report sheet update ho gayi — "
-          f"V1={len(v1_rows)}, V2={len(v2_rows)}, V3={len(v3_rows)} matching setups.")
+          f"V1={len(v1_rows)}, V2={len(v2_rows)}, V3={len(v3_rows)}, "
+          f"V4={len(v4_rows)}, V5={len(v5_rows)}, V6={len(v6_rows)} matching setups.")
 
 
 # ============================================

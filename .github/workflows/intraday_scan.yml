@@ -30,8 +30,8 @@ jobs:
           echo "TELEGRAM_STRONG_CHAT_ID = \"${{ secrets.TELEGRAM_STRONG_CHAT_ID }}\"" >> telegram_config.py
           echo "CONFUSION_BOT_TOKEN = \"${{ secrets.CONFUSION_BOT_TOKEN }}\"" >> telegram_config.py
           echo "CONFUSION_CHAT_ID = \"${{ secrets.CONFUSION_CHAT_ID }}\"" >> telegram_config.py
-      - name: Migrate results header (one-time)
-        run: python -c "import sr_shape_outcome_tracker as t; t._migrate_results_header()"
+      - name: Migrate all sheets (one-time)
+        run: python -c "import sr_shape_outcome_tracker as t; t.migrate_all_sheets()"
       - name: Generate strategy report sheet
         run: python -c "import sr_shape_outcome_tracker as t; t.generate_strategy_report_sheet()"
       - name: Run intraday_spike_monitor.py

@@ -307,33 +307,117 @@ def _get_results_worksheet():
 # ============================================
 # NAYA (v4.2): ONE-TIME HEADER MIGRATION HELPER
 # ============================================
+# ============================================
+# NAYA (v4.4): FULL HEADER + DATA MIGRATION (header-only migration se
+# UPGRADE) — ab Awaiting aur Pending sheets bhi migrate hoti hain, aur
+# purani time-values (jo UTC format mein thi) ko bhi IST format mein
+# CONVERT kiya jaata hai — sirf header rename nahi.
+#
+# YEH ZAROORI HAI: agar sirf header ka naam badal diya jaaye lekin
+# neeche ki values purane UTC-format mein hi reh jaayein, to
+# _ist_str_to_utc_dt() unhe GALAT tarike se parse karega (IST samajh
+# ke 5:30 ghata dega jab ki value already UTC thi) — isse kisi bhi
+# LIVE PENDING setup ka 120-min window/anchor-time galat ho sakta
+# hai. Isliye yeh migration purani values ko bhi properly IST mein
+# convert karta hai, na ki sirf header text badalta hai.
+# ============================================
+def _migrate_sheet_header_and_data(ws, target_header, time_field_map, dry_run=False):
+    """
+    ws: worksheet object
+    target_header: current (naya) header jisse match karna hai
+    time_field_map: {naya_field_name: [purane possible naam, jinme se
+                     value dhoondhni hai]} — sirf time-fields ke liye,
+                     baaki fields field-name-match se copy hote hain.
+    """
+    all_values = ws.get_all_values()
+    if not all_values:
+        if not dry_run:
+            ws.update("A1", [target_header])
+        return "sheet khali thi, sirf header likh diya"
+
+    old_header = all_values[0]
+    if old_header == target_header:
+        return "already up-to-date, kuch nahi kiya"
+
+    old_rows = all_values[1:]
+    new_rows = []
+    for old_row in old_rows:
+        old_dict = dict(zip(old_header, old_row))
+        new_row = []
+        for field in target_header:
+            if field in time_field_map:
+                raw_val = None
+                for cand in time_field_map[field]:
+                    if cand in old_dict and old_dict[cand] not in ("", None):
+                        raw_val = old_dict[cand]
+                        break
+                if raw_val:
+                    val_str = str(raw_val).strip()
+                    if val_str.endswith("IST"):
+                        # already IST format hai (dobara migration ka case) — as-is rakho
+                        new_row.append(val_str)
+                    else:
+                        try:
+                            new_row.append(_to_ist_str(val_str))
+                        except Exception:
+                            new_row.append(val_str)  # parse fail ho to purani value hi rakho, data loss na ho
+                else:
+                    new_row.append("")
+            else:
+                new_row.append(old_dict.get(field, ""))
+        new_rows.append(new_row)
+
+    if dry_run:
+        return f"{len(new_rows)} rows migrate hoti (dry-run, kuch likha nahi)"
+
+    ws.clear()
+    ws.update([target_header] + new_rows)
+    return f"{len(new_rows)} rows migrate ho gayi (time-values UTC->IST convert hui)"
+
+
+def _migrate_awaiting_header(dry_run=False):
+    """Confusion_Awaiting_Confirmation ka header+data migrate karta hai."""
+    ws = _get_awaiting_worksheet()
+    time_map = {"Candle_Time": ["Candle_Time", "Candle_Time_UTC"]}
+    result = _migrate_sheet_header_and_data(ws, AWAITING_HEADER, time_map, dry_run=dry_run)
+    print(f"  [sr_shape_tracker] Awaiting sheet migration: {result}")
+
+
+def _migrate_pending_header(dry_run=False):
+    """Confusion_Pending ka header+data migrate karta hai — LIVE active setups yahan hote hain, isliye time-value conversion critical hai."""
+    ws = _get_pending_worksheet()
+    time_map = {
+        "Candle_Time": ["Candle_Time", "Candle_Time_UTC"],
+        "Next_Candle_Time": ["Next_Candle_Time", "Next_Candle_Time_UTC"],
+    }
+    result = _migrate_sheet_header_and_data(ws, PENDING_HEADER, time_map, dry_run=dry_run)
+    print(f"  [sr_shape_tracker] Pending sheet migration: {result}")
+
+
 def _migrate_results_header(dry_run=False):
     """
-    One-time helper — existing Confusion_Backtest_Data sheet ka
-    header row (Row 1) ko current RESULTS_HEADER (jisme ab naye 8
-    first-event/MFE-MAE columns hain) se match karta hai.
-
-    DATA ROWS KO TOUCH NAHI KARTA — sirf Row 1 update hota hai.
-    Purani rows ke naye columns automatically khali (blank) reh
-    jaayenge, jo expected hai (unke liye first-event outcome kabhi
-    calculate nahi hua tha, aur dobara calculate bhi nahi hoga —
-    resolve_pending() sirf Confusion_Pending ki active rows process
-    karta hai).
-
-    Chalane ka tarika (ek baar, manually):
+    Confusion_Backtest_Data ka header+data migrate karta hai.
+    Chalane ka tarika (ek baar, manually — ya migrate_all_sheets() se):
         python -c "import sr_shape_outcome_tracker as t; t._migrate_results_header()"
     """
     ws = _get_results_worksheet()
-    current_header = ws.row_values(1)
-    if current_header == RESULTS_HEADER:
-        print("  [sr_shape_tracker] Header already up-to-date — kuch karne ki zaroorat nahi.")
-        return
-    if dry_run:
-        print(f"  [sr_shape_tracker][DRY_RUN] Header ye update hota:\n{RESULTS_HEADER}")
-        return
-    ws.update("A1", [RESULTS_HEADER])
-    print(f"  [sr_shape_tracker] Header migrated — ab {len(RESULTS_HEADER)} columns hain "
-          f"(pehle {len(current_header)} the).")
+    time_map = {
+        "Candle_Time": ["Candle_Time", "Candle_Time_UTC"],
+        "Next_Candle_Time": ["Next_Candle_Time", "Next_Candle_Time_UTC"],
+    }
+    result = _migrate_sheet_header_and_data(ws, RESULTS_HEADER, time_map, dry_run=dry_run)
+    print(f"  [sr_shape_tracker] Results sheet migration: {result}")
+
+
+def migrate_all_sheets(dry_run=False):
+    """
+    NAYA — teeno sheets (Awaiting, Pending, Results) ek saath migrate
+    karta hai. Yeh function chalao (deploy ke turant baad, ek baar):
+        python -c "import sr_shape_outcome_tracker as t; t.migrate_all_sheets()"
+    """
+    _migrate_awaiting_header(dry_run=dry_run)
+    _migrate_pending_header(dry_run=dry_run)
+    _migrate_results_header(dry_run=dry_run)
 
 
 # ============================================

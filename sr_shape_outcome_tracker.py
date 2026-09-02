@@ -199,7 +199,7 @@ SUPPORT_POSITIONS = ("NEAR_SUPPORT", "BREAKDOWN_BELOW_SUPPORT")
 RESISTANCE_POSITIONS = ("NEAR_RESISTANCE", "BREAKOUT_ABOVE_RESISTANCE")
 
 AWAITING_HEADER = [
-    "Pair", "Candle_Time_UTC", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
+    "Pair", "Candle_Time", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
     "Price_Position", "SR_Level_Price", "SR_Touch_Count",
     "Candle_Shape", "Shape_Strength", "Body_Pct", "Rejection_Side",
     "Candle_High", "Candle_Low",
@@ -207,21 +207,21 @@ AWAITING_HEADER = [
 ]
 
 PENDING_HEADER = [
-    "Pair", "Candle_Time_UTC", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
+    "Pair", "Candle_Time", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
     "Price_Position", "SR_Level_Price", "SR_Touch_Count",
     "Candle_Shape", "Shape_Strength", "Body_Pct", "Rejection_Side",
     "Confusion_High", "Confusion_Low", "Confusion_Close",
-    "Next_Candle_Time_UTC", "Next_Candle_High", "Next_Candle_Low",
+    "Next_Candle_Time", "Next_Candle_High", "Next_Candle_Low",
     "Break_Direction", "Entry_Price", "Stop_Loss", "SL_Distance_Pct",
     "Status",
 ]
 
 RESULTS_HEADER = (
-    ["Pair", "Candle_Time_UTC", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
+    ["Pair", "Candle_Time", "Candle_Color", "Close", "RVOL_20", "RVOL_96",
      "Price_Position", "SR_Level_Price", "SR_Touch_Count",
      "Candle_Shape", "Shape_Strength", "Body_Pct", "Rejection_Side",
      "Confusion_High", "Confusion_Low", "Confusion_Close",
-     "Next_Candle_Time_UTC", "Next_Candle_High", "Next_Candle_Low",
+     "Next_Candle_Time", "Next_Candle_High", "Next_Candle_Low",
      "Break_Direction", "Entry_Price", "Stop_Loss", "SL_Distance_Pct"]
     + [f"Price_After_{m}min" for m in HORIZONS_MINUTES]
     + [f"PctChg_{m}min" for m in HORIZONS_MINUTES]
@@ -352,6 +352,30 @@ def _to_ist_str(value):
         dt = dt.tz_localize("UTC")
     ist_dt = dt + pd.Timedelta(hours=5, minutes=30)
     return ist_dt.strftime("%Y-%m-%d %H:%M:%S") + " IST"
+
+
+def _ist_str_to_utc_dt(value):
+    """
+    NAYA — Sheet mein ab Candle_Time / Next_Candle_Time columns IST
+    format mein store hote hain (e.g. '2026-09-01 11:30:00 IST'),
+    taaki tumhare charts (jo IST mein hote hain) se time seedha match
+    ho jaaye.
+
+    Lekin saari INTERNAL date-math (candle-matching, anchor-time se
+    horizon nikalna, staleness check, 120-min window) bilkul pehle
+    jaisi hi UTC mein honi zaroori hai — kyunki CoinDCX se candles
+    UTC mein aate hain. Yeh helper sheet ki IST string ko wapas
+    UTC-aware datetime mein convert karta hai, taaki koi calculation
+    galat na ho — sirf DISPLAY IST hai, logic bilkul same UTC hai.
+    """
+    s = str(value).strip()
+    if s.endswith("IST"):
+        s = s[:-3].strip()
+    dt = pd.to_datetime(s)
+    if dt.tzinfo is not None:
+        dt = dt.tz_localize(None)
+    utc_dt = dt.to_pydatetime() - timedelta(hours=5, minutes=30)
+    return utc_dt.replace(tzinfo=timezone.utc)
 
 
 def _find_closest_candle(df, target_time, tolerance_minutes=MATCH_TOLERANCE_MINUTES):
@@ -569,7 +593,7 @@ def process_candle(pair, df, dry_run=False):
     else:
         awaiting_ws.append_row([
             pair,
-            str(_to_utc_dt(candle_time)),
+            _to_ist_str(candle_time),
             candle_color,
             close,
             rvol_20 if rvol_20 is not None else "",
@@ -656,7 +680,7 @@ def resolve_confirmations(dry_run=False):
             continue
 
         pair = row["Pair"]
-        candle_time = _to_utc_dt(row["Candle_Time_UTC"])
+        candle_time = _ist_str_to_utc_dt(row["Candle_Time"])
         confusion_high = float(row["Candle_High"])
         confusion_low = float(row["Candle_Low"])
         close = float(row["Close"])
@@ -666,7 +690,7 @@ def resolve_confirmations(dry_run=False):
         rvol_96 = float(rvol_96_raw) if rvol_96_raw not in ("", None) else None
 
         if now_utc - candle_time > timedelta(hours=MAX_AGE_HOURS):
-            print(f"  [sr_shape_tracker] {pair} @ {row['Candle_Time_UTC']} stale (awaiting), discard.")
+            print(f"  [sr_shape_tracker] {pair} @ {row['Candle_Time']} stale (awaiting), discard.")
             discarded_count += 1
             continue
 
@@ -698,7 +722,7 @@ def resolve_confirmations(dry_run=False):
 
         common_fields = dict(
             pair=pair,
-            candle_time_str=row["Candle_Time_UTC"],
+            candle_time_str=row["Candle_Time"],
             candle_color=row["Candle_Color"],
             close=close,
             rvol_20=rvol_20,
@@ -713,7 +737,7 @@ def resolve_confirmations(dry_run=False):
             confusion_high=confusion_high,
             confusion_low=confusion_low,
             confusion_close=close,
-            next_candle_time_str=str(_to_utc_dt(next_candle_time)),
+            next_candle_time_str=_to_ist_str(next_candle_time),
             next_high=next_high,
             next_low=next_low,
         )
@@ -721,7 +745,8 @@ def resolve_confirmations(dry_run=False):
         if break_direction == "NO_CONFIRMATION":
             no_confirmation_count += 1
             result_row = (
-                [common_fields["pair"], common_fields["candle_time_str"], common_fields["candle_color"],
+                [common_fields["pair"], common_fields["candle_time_str"],
+                 common_fields["candle_color"],
                  common_fields["close"], common_fields["rvol_20"] if common_fields["rvol_20"] is not None else "",
                  common_fields["rvol_96"] if common_fields["rvol_96"] is not None else "",
                  common_fields["price_position"], common_fields["sr_level_price"], common_fields["sr_touch_count"],
@@ -740,7 +765,7 @@ def resolve_confirmations(dry_run=False):
                 + ["", ""]                        # MFE_120, MAE_120
             )
             if dry_run:
-                print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION (CLOSED): {pair} @ {row['Candle_Time_UTC']}")
+                print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION (CLOSED): {pair} @ {row['Candle_Time']}")
             else:
                 try:
                     _get_results_worksheet().append_row(result_row, table_range="A1")
@@ -782,7 +807,7 @@ def resolve_confirmations(dry_run=False):
             pending_ws = _get_pending_worksheet()
             pending_ws.append_row([
                 pair,
-                row["Candle_Time_UTC"],
+                _to_ist_str(candle_time),
                 row["Candle_Color"],
                 close,
                 rvol_20 if rvol_20 is not None else "",
@@ -797,7 +822,7 @@ def resolve_confirmations(dry_run=False):
                 confusion_high,
                 confusion_low,
                 close,
-                str(_to_utc_dt(next_candle_time)),
+                _to_ist_str(next_candle_time),
                 next_high,
                 next_low,
                 break_direction,
@@ -822,7 +847,8 @@ def resolve_confirmations(dry_run=False):
     if not dry_run:
         try:
             clean_rows = [[
-                r["Pair"], r["Candle_Time_UTC"], r["Candle_Color"], r["Close"],
+                r["Pair"], r["Candle_Time"],
+                r["Candle_Color"], r["Close"],
                 r.get("RVOL_20", ""),
                 r.get("RVOL_96", ""),
                 r.get("Price_Position", "UNKNOWN"),
@@ -1214,7 +1240,7 @@ def resolve_pending(dry_run=False):
         if str(r.get("Status", "")).upper() == "PENDING" and not _is_valid_pending_row(r)
     ]
     for r in invalid_rows:
-        print(f"  [sr_shape_tracker] WARNING: {r.get('Pair')} @ {r.get('Candle_Time_UTC')} "
+        print(f"  [sr_shape_tracker] WARNING: {r.get('Pair')} @ {r.get('Candle_Time')} "
               f"found in Confusion_Pending with invalid Break_Direction="
               f"{r.get('Break_Direction')!r} — dropping, NOT tracking outcome for it.")
 
@@ -1237,7 +1263,7 @@ def resolve_pending(dry_run=False):
             continue
 
         pair = row["Pair"]
-        anchor_time = _to_utc_dt(row["Next_Candle_Time_UTC"])
+        anchor_time = _ist_str_to_utc_dt(row["Next_Candle_Time"])
         close = float(row["Close"])
         break_direction = row.get("Break_Direction", "")
         entry_price = float(row.get("Entry_Price", close) or close)
@@ -1249,7 +1275,7 @@ def resolve_pending(dry_run=False):
         rvol_96 = float(rvol_96_raw) if rvol_96_raw not in ("", None) else None
 
         if now_utc - anchor_time > timedelta(hours=MAX_AGE_HOURS):
-            print(f"  [sr_shape_tracker] {pair} @ {row['Next_Candle_Time_UTC']} stale (pending), discard.")
+            print(f"  [sr_shape_tracker] {pair} @ {row['Next_Candle_Time']} stale (pending), discard.")
             discarded_count += 1
             continue
 
@@ -1266,7 +1292,7 @@ def resolve_pending(dry_run=False):
 
         result_row = [
             pair,
-            row["Candle_Time_UTC"],
+            row.get("Candle_Time") or "",
             row["Candle_Color"],
             close,
             rvol_20 if rvol_20 is not None else "",
@@ -1281,7 +1307,7 @@ def resolve_pending(dry_run=False):
             row.get("Confusion_High", ""),
             row.get("Confusion_Low", ""),
             row.get("Confusion_Close", ""),
-            row.get("Next_Candle_Time_UTC", ""),
+            row.get("Next_Candle_Time", ""),
             row.get("Next_Candle_High", ""),
             row.get("Next_Candle_Low", ""),
             break_direction,
@@ -1369,7 +1395,8 @@ def resolve_pending(dry_run=False):
     if not dry_run:
         try:
             clean_rows = [[
-                r["Pair"], r["Candle_Time_UTC"], r["Candle_Color"], r["Close"],
+                r["Pair"], r["Candle_Time"],
+                r["Candle_Color"], r["Close"],
                 r.get("RVOL_20", ""),
                 r.get("RVOL_96", ""),
                 r.get("Price_Position", "UNKNOWN"),
@@ -1382,7 +1409,7 @@ def resolve_pending(dry_run=False):
                 r.get("Confusion_High", ""),
                 r.get("Confusion_Low", ""),
                 r.get("Confusion_Close", ""),
-                r.get("Next_Candle_Time_UTC", ""),
+                r.get("Next_Candle_Time", ""),
                 r.get("Next_Candle_High", ""),
                 r.get("Next_Candle_Low", ""),
                 r.get("Break_Direction", ""),

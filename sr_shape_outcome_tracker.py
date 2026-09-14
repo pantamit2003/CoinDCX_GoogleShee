@@ -11,33 +11,33 @@ v4.1 — STATE-FLOW FIX:
     NAHI sakte aur kabhi bhi future candles mein dobara confirmation
     ke liye "alive" nahi rehte. (unchanged from before)
 
-v4.2 — FIRST-EVENT OUTCOME TRACKING (THIS REVISION):
+v4.2 — FIRST-EVENT OUTCOME TRACKING:
     NAYA — resolve_pending() ab, existing per-horizon SL_Hit_*/
     Target_*_Hit booleans ke ALAWA, ek naya "first event" verdict
     bhi calculate karta hai: WIN_1R / LOSS_SL / TIMEOUT / AMBIGUOUS.
-    Yeh chronological candle-walk se pehla event (1R target ya SL,
-    jo bhi pehle aaye) detect karta hai. Same-candle mein dono touch
-    hone par (documented, explicit user requirement) AMBIGUOUS
-    maana jaata hai — is baar SL-first assume NAHI kiya jaata (yeh
-    purane _analyze_trade_outcome() ke SL-first convention se
-    JAANBUJHKAR alag hai — dono conventions ab sheet mein saath-saath
-    maujood hain, alag columns mein).
-    Naye columns (Confusion_Backtest_Data, end mein append):
-        Outcome_1R, Outcome_Time, Target_1R_Price, R_Distance,
-        Outcome_R_Multiple, Outcome_Status, MFE_120, MAE_120
-    Existing columns (Price_After_*, PctChg_*, Max_Favorable_Move_Pct,
-    Max_Adverse_Move_Pct, SL_Hit_*m, Target_*R_Hit) BILKUL UNCHANGED
-    hain — dono naya aur purana system saath-saath chalte hain.
-    Purani rows RECALCULATE nahi hoti (resolve_pending() sirf
-    Confusion_Pending ki active rows process karta hai, already-
-    written Confusion_Backtest_Data rows ko kabhi touch nahi karta).
-    NAYA function generate_backtest_summary() bhi add hua — poori
-    tarah READ-ONLY (Confusion_Backtest_Data se padhta hai), koi
-    tracking-flow ko touch nahi karta. Overall summary + V1/V2/V3
-    strategy-variant breakdown print karta hai.
-    NAYA one-time helper _migrate_results_header() bhi add hua — sirf
-    Row 1 (header) update karta hai existing sheet par, data rows
-    touch nahi hote.
+
+v4.3 — SEPARATE STRATEGY-REPORT SHEET (V1-V6).
+
+v4.4 — FULL HEADER + DATA MIGRATION HELPERS (UTC->IST time-value
+    conversion bhi karte hain, sirf header-rename nahi).
+
+v4.5 — MARKET REGIME LABELING (THIS REVISION):
+    NAYA — market_regime.py (alag, standalone module) se, har
+    CONFUSION candle detect hote hi (process_candle() mein), us
+    candle se STRICTLY PEHLE ki candles (df.iloc[:-1]) use karke
+    Market_Regime / Regime_Score / Regime_Lookback / Trend_Direction
+    calculate karke record kiya jaata hai.
+    NO LOOKAHEAD: confirmation/future/outcome candle kabhi is
+    calculation mein use nahi hoti — process_candle() ke waqt woh
+    candles abhi exist hi nahi karti (future mein hain).
+    NO EXTRA API CALL: existing df (jo already caller se aata hai)
+    hi reuse hota hai.
+    REGIME SIRF RECORD HOTA HAI — V5 entry/confirmation/outcome
+    eligibility isse bilkul affect nahi hoti. Awaiting -> Pending ->
+    Backtest_Data, teeno sheets mein yeh label sirf CARRY-FORWARD
+    hota hai (row-se-row copy), dobara calculate nahi hota.
+    Koi existing V5 rule, filter, entry/SL/outcome logic MODIFY
+    nahi hui hai — sirf naye columns end mein append hue hain.
 
 YEH FLOWCHART IMPLEMENT KARTA HAI (v4, unchanged):
     15-min candle
@@ -58,7 +58,8 @@ YEH FLOWCHART IMPLEMENT KARTA HAI (v4, unchanged):
        NO -> skip (volume ka support nahi hai)
        YES -> CONFUSION candle ka HIGH/LOW record karo, "AWAITING
               CONFIRMATION" state mein daal do (abhi LONG/SHORT
-              decide NAHI karna)
+              decide NAHI karna). Market regime bhi yahin record
+              hota hai (v4.5).
         |
     IMMEDIATELY NEXT (aur SIRF immediately next) 15-min candle kya karti hai?
         CONFUSION HIGH break        -> LONG  (Entry = Confusion High, SL = Confusion Low)
@@ -69,10 +70,10 @@ YEH FLOWCHART IMPLEMENT KARTA HAI (v4, unchanged):
     Confirm hone ke baad (LONG/SHORT), confirmation-candle ke time se
     next 15/30/45/60/90/120 min mein kya hua?
     (price movement, SL hit/nahi, target R-multiples hit/nahi,
-     max favorable/adverse move, AUR NAYA: first-event WIN_1R/LOSS_SL/
+     max favorable/adverse move, first-event WIN_1R/LOSS_SL/
      TIMEOUT/AMBIGUOUS)
         |
-    BACKTEST DATA (Google Sheet mein)
+    BACKTEST DATA (Google Sheet mein) — market regime label ke saath
 
 KYUN ALAG MODULE (unchanged):
     - backtest_tracker.py RVOL-spike TRIGGER se chalta hai, alag
@@ -119,6 +120,15 @@ VOLUME / RVOL (v4 — relaxed gate, unchanged formula):
     Calculation logic bilkul intraday_spike_monitor.py ke
     get_intraday_rvol() jaisa hi hai — koi naya formula nahi.
 
+MARKET REGIME (v4.5, NAYA — analysis-only, no lookahead):
+    market_regime.classify_market_regime(df.iloc[:-1]) confusion
+    candle detect hone ke turant baad, process_candle() ke andar
+    call hota hai. df.iloc[:-1] mein confusion candle khud EXCLUDE
+    hoti hai, aur confirmation/future candle us waqt tak abhi fetch
+    hi nahi hui hoti (future mein hai) — isliye lookahead structurally
+    impossible hai. Label sirf Awaiting/Pending/Results teeno sheets
+    mein carry-forward hota hai, V5 eligibility ko affect nahi karta.
+
 KAISE HOOK KARNA HAI:
     import sr_shape_outcome_tracker as sr_shape_tracker
     ...
@@ -128,10 +138,13 @@ KAISE HOOK KARNA HAI:
     sr_shape_tracker.process_candle(pair, df, dry_run=DRY_RUN)  # har pair ke liye
 
     ONE-TIME (naya sheet-header migrate karne ke liye, script se alag chala lo):
-        python -c "import sr_shape_outcome_tracker as t; t._migrate_results_header()"
+        python -c "import sr_shape_outcome_tracker as t; t.migrate_all_sheets()"
 
     Summary dekhne ke liye (kabhi bhi, standalone):
         python -c "import sr_shape_outcome_tracker as t; t.generate_backtest_summary()"
+
+    Regime analysis dekhne ke liye (kabhi bhi, standalone):
+        python -c "import sr_shape_outcome_tracker as t; t.generate_regime_analysis()"
 """
 from datetime import datetime, timedelta, timezone
 import pandas as pd
@@ -141,6 +154,7 @@ from data.candles import get_candles
 from support_resistance import get_support_resistance, classify_price_position
 from candle_shape import classify_candle_shape
 from notifications.telegram_bot import send_confusion_telegram_message  # teesra, alag bot
+import market_regime   # NAYA (v4.5) — RVOL-independent, no-lookahead regime label
 import config
 
 # ============================================
@@ -204,6 +218,8 @@ AWAITING_HEADER = [
     "Candle_Shape", "Shape_Strength", "Body_Pct", "Rejection_Side",
     "Candle_High", "Candle_Low",
     "Status",
+    # ---- NAYA (v4.5): market regime ----
+    "Market_Regime", "Regime_Score", "Regime_Lookback", "Trend_Direction",
 ]
 
 PENDING_HEADER = [
@@ -214,6 +230,8 @@ PENDING_HEADER = [
     "Next_Candle_Time", "Next_Candle_High", "Next_Candle_Low",
     "Break_Direction", "Entry_Price", "Stop_Loss", "SL_Distance_Pct",
     "Status",
+    # ---- NAYA (v4.5): market regime ----
+    "Market_Regime", "Regime_Score", "Regime_Lookback", "Trend_Direction",
 ]
 
 RESULTS_HEADER = (
@@ -233,6 +251,8 @@ RESULTS_HEADER = (
        "Outcome_R_Multiple", "Outcome_Status"]
     # ---- NAYA (v4.2): MFE/MAE over the 120-min window ----
     + ["MFE_120", "MAE_120"]
+    # ---- NAYA (v4.5): market regime ----
+    + ["Market_Regime", "Regime_Score", "Regime_Lookback", "Trend_Direction"]
 )
 
 # ============================================
@@ -305,21 +325,7 @@ def _get_results_worksheet():
 
 
 # ============================================
-# NAYA (v4.2): ONE-TIME HEADER MIGRATION HELPER
-# ============================================
-# ============================================
-# NAYA (v4.4): FULL HEADER + DATA MIGRATION (header-only migration se
-# UPGRADE) — ab Awaiting aur Pending sheets bhi migrate hoti hain, aur
-# purani time-values (jo UTC format mein thi) ko bhi IST format mein
-# CONVERT kiya jaata hai — sirf header rename nahi.
-#
-# YEH ZAROORI HAI: agar sirf header ka naam badal diya jaaye lekin
-# neeche ki values purane UTC-format mein hi reh jaayein, to
-# _ist_str_to_utc_dt() unhe GALAT tarike se parse karega (IST samajh
-# ke 5:30 ghata dega jab ki value already UTC thi) — isse kisi bhi
-# LIVE PENDING setup ka 120-min window/anchor-time galat ho sakta
-# hai. Isliye yeh migration purani values ko bhi properly IST mein
-# convert karta hai, na ki sirf header text badalta hai.
+# ONE-TIME HEADER MIGRATION HELPERS (unchanged from v4.4)
 # ============================================
 def _migrate_sheet_header_and_data(ws, target_header, time_field_map, dry_run=False):
     """
@@ -411,8 +417,8 @@ def _migrate_results_header(dry_run=False):
 
 def migrate_all_sheets(dry_run=False):
     """
-    NAYA — teeno sheets (Awaiting, Pending, Results) ek saath migrate
-    karta hai. Yeh function chalao (deploy ke turant baad, ek baar):
+    Teeno sheets (Awaiting, Pending, Results) ek saath migrate karta
+    hai. Yeh function chalao (deploy ke turant baad, ek baar):
         python -c "import sr_shape_outcome_tracker as t; t.migrate_all_sheets()"
     """
     _migrate_awaiting_header(dry_run=dry_run)
@@ -440,17 +446,10 @@ def _to_ist_str(value):
 
 def _ist_str_to_utc_dt(value):
     """
-    NAYA — Sheet mein ab Candle_Time / Next_Candle_Time columns IST
-    format mein store hote hain (e.g. '2026-09-01 11:30:00 IST'),
-    taaki tumhare charts (jo IST mein hote hain) se time seedha match
-    ho jaaye.
-
-    Lekin saari INTERNAL date-math (candle-matching, anchor-time se
-    horizon nikalna, staleness check, 120-min window) bilkul pehle
-    jaisi hi UTC mein honi zaroori hai — kyunki CoinDCX se candles
-    UTC mein aate hain. Yeh helper sheet ki IST string ko wapas
-    UTC-aware datetime mein convert karta hai, taaki koi calculation
-    galat na ho — sirf DISPLAY IST hai, logic bilkul same UTC hai.
+    Sheet mein Candle_Time / Next_Candle_Time columns IST format mein
+    store hote hain (e.g. '2026-09-01 11:30:00 IST'). Yeh helper wapas
+    UTC-aware datetime mein convert karta hai (internal date-math ke
+    liye) — sirf DISPLAY IST hai, logic bilkul UTC hai.
     """
     s = str(value).strip()
     if s.endswith("IST"):
@@ -578,7 +577,6 @@ def _rvol_gate_passed(rvol_20, rvol_96):
 
 # ============================================
 # STAGE 1: CONFUSION candle detect karna + AWAITING_CONFIRMATION mein daalna
-# (UNCHANGED)
 # ============================================
 def process_candle(pair, df, dry_run=False):
     """
@@ -590,6 +588,12 @@ def process_candle(pair, df, dry_run=False):
     DIRECTION YAHAN DECIDE NAHI HOTI (v4 change) — woh
     resolve_confirmations() IMMEDIATELY NEXT candle dekhkar karega,
     aur sirf usi ek candle ka wait hota hai (v4.1).
+
+    v4.5 NAYA: Market regime bhi yahin calculate hota hai — confusion
+    candle se STRICTLY PEHLE ki candles (df.iloc[:-1]) use karke,
+    koi lookahead nahi (confirmation/future candle abhi exist hi
+    nahi karti is point par). Yeh label sirf RECORD hota hai —
+    V5 entry/confirmation/outcome eligibility par koi asar nahi.
 
     df: candle dataframe (kam se kam SR_LOOKBACK+ candles chahiye,
         columns: Time/Open/High/Low/Close/Volume)
@@ -654,6 +658,15 @@ def process_candle(pair, df, dry_run=False):
               f"ya >= {RVOL_LONG_THRESHOLD}) — skip.")
         return False
 
+    # ---- NAYA (v4.5): MARKET REGIME (no-lookahead, no extra API call) ----
+    # df.iloc[:-1] = confusion candle ko EXCLUDE karke, saari pichli
+    # candles — same fetch ka reuse, koi naya get_candles() call nahi.
+    try:
+        regime_result = market_regime.classify_market_regime(df.iloc[:-1])
+    except Exception as e:
+        print(f"  [sr_shape_tracker] {pair} regime calc error: {e}")
+        regime_result = market_regime._insufficient_result(0)
+
     # ---- COOLDOWN: same pair already awaiting-confirmation ya pending ho to skip ----
     awaiting_ws = _get_awaiting_worksheet()
     existing_awaiting = awaiting_ws.get_all_records()
@@ -673,7 +686,8 @@ def process_candle(pair, df, dry_run=False):
               f"pos={price_position} shape={shape_ctx['shape']} "
               f"level={sr_level_price} touches={sr_touch_count} "
               f"RVOL_20={rvol_20} RVOL_96={rvol_96} "
-              f"CONFUSION High={candle_high} Low={candle_low}")
+              f"CONFUSION High={candle_high} Low={candle_low} "
+              f"Regime={regime_result['Market_Regime']} Score={regime_result['Regime_Score']}")
     else:
         awaiting_ws.append_row([
             pair,
@@ -692,13 +706,20 @@ def process_candle(pair, df, dry_run=False):
             candle_high,
             candle_low,
             "AWAITING_CONFIRMATION",
+            # ---- NAYA (v4.5): regime fields ----
+            regime_result["Market_Regime"],
+            regime_result["Regime_Score"] if regime_result["Regime_Score"] is not None else "",
+            regime_result["Regime_Lookback"],
+            regime_result["Trend_Direction"] or "",
         ], table_range="A1")
 
     print(f"  [sr_shape_tracker] {pair} qualified for confirmation: {price_position} "
           f"(touched {sr_touch_count}x) | Shape=CONFUSION "
           f"({shape_ctx['strength']}, body={shape_ctx['body_pct']}%) | "
           f"RVOL_20={rvol_20} RVOL_96={rvol_96} (gate PASSED) | "
-          f"High={candle_high} Low={candle_low} — waiting for immediately-next candle.")
+          f"High={candle_high} Low={candle_low} | "
+          f"Regime={regime_result['Market_Regime']} (score={regime_result['Regime_Score']}) — "
+          f"waiting for immediately-next candle.")
 
     # ---- CONFUSION bot ko Telegram alert (awaiting confirmation) ----
     awaiting_msg = _build_awaiting_message(
@@ -718,7 +739,6 @@ def process_candle(pair, df, dry_run=False):
 
 # ============================================
 # STAGE 2: IMMEDIATELY NEXT CANDLE se breakout direction CONFIRM karna
-# (UNCHANGED)
 # ============================================
 def resolve_confirmations(dry_run=False):
     """
@@ -736,6 +756,11 @@ def resolve_confirmations(dry_run=False):
     row ke saath record ho jaata hai (taaki pata chale kitni baar
     confirmation nahi milta), aur us candle ko is function ke baad
     kabhi dobara process NAHI kiya jaata.
+
+    v4.5: Market_Regime/Regime_Score/Regime_Lookback/Trend_Direction
+    sirf AAGE CARRY hote hain (Awaiting row mein already calculate ho
+    chuke the process_candle() mein) — yahan koi naya regime-calc
+    nahi hota, sirf row-se-row copy hota hai.
     """
     awaiting_ws = _get_awaiting_worksheet()
     records = awaiting_ws.get_all_records()
@@ -824,6 +849,11 @@ def resolve_confirmations(dry_run=False):
             next_candle_time_str=_to_ist_str(next_candle_time),
             next_high=next_high,
             next_low=next_low,
+            # ---- NAYA (v4.5): regime carry-forward fields ----
+            market_regime_label=row.get("Market_Regime", ""),
+            regime_score=row.get("Regime_Score", ""),
+            regime_lookback=row.get("Regime_Lookback", ""),
+            trend_direction=row.get("Trend_Direction", ""),
         )
 
         if break_direction == "NO_CONFIRMATION":
@@ -844,9 +874,11 @@ def resolve_confirmations(dry_run=False):
                 + ["", ""]                        # Max favorable/adverse
                 + [""] * len(HORIZONS_MINUTES)   # SL_Hit_*
                 + [""] * len(TARGET_RR)          # Target_*_Hit
-                # ---- NAYA: first-event + MFE/MAE columns bhi blank ----
                 + ["", "", "", "", "", ""]        # Outcome_1R..Outcome_Status
                 + ["", ""]                        # MFE_120, MAE_120
+                # ---- NAYA (v4.5): regime fields (carried, even for NO_CONFIRMATION) ----
+                + [common_fields["market_regime_label"], common_fields["regime_score"],
+                   common_fields["regime_lookback"], common_fields["trend_direction"]]
             )
             if dry_run:
                 print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION (CLOSED): {pair} @ {row['Candle_Time']}")
@@ -914,6 +946,11 @@ def resolve_confirmations(dry_run=False):
                 stop_loss,
                 sl_distance_pct,
                 "PENDING",
+                # ---- NAYA (v4.5): regime fields (carried forward) ----
+                row.get("Market_Regime", ""),
+                row.get("Regime_Score", ""),
+                row.get("Regime_Lookback", ""),
+                row.get("Trend_Direction", ""),
             ], table_range="A1")
             try:
                 confirm_msg = _build_confirmation_message(
@@ -945,6 +982,11 @@ def resolve_confirmations(dry_run=False):
                 r.get("Candle_High", ""),
                 r.get("Candle_Low", ""),
                 "AWAITING_CONFIRMATION",
+                # ---- NAYA (v4.5): regime fields (preserved on rewrite) ----
+                r.get("Market_Regime", ""),
+                r.get("Regime_Score", ""),
+                r.get("Regime_Lookback", ""),
+                r.get("Trend_Direction", ""),
             ] for r in still_awaiting]
             awaiting_ws.clear()
             awaiting_ws.update([AWAITING_HEADER] + clean_rows)
@@ -1158,7 +1200,7 @@ def _analyze_trade_outcome(df, anchor_time, break_direction, entry_price, stop_l
 
 
 # ============================================
-# NAYA (v4.2): FIRST-EVENT OUTCOME TRACKING
+# FIRST-EVENT OUTCOME TRACKING (v4.2, unchanged)
 # ============================================
 def _pct_moves(entry_price, best_favorable_extreme, worst_adverse_extreme, is_long):
     """MFE/MAE % helper — direction-aware (LONG: up=favorable, SHORT: down=favorable)."""
@@ -1174,7 +1216,7 @@ def _pct_moves(entry_price, best_favorable_extreme, worst_adverse_extreme, is_lo
 def _compute_first_event_outcome(df, anchor_time, break_direction, entry_price, stop_loss,
                                   horizon_minutes=FIRST_EVENT_HORIZON_MINUTES):
     """
-    NAYA (v4.2) — FIRST-EVENT outcome tracking.
+    FIRST-EVENT outcome tracking (v4.2, unchanged).
 
     Existing _analyze_trade_outcome() ke per-horizon SL_Hit_*/
     Target_*_Hit booleans se INDEPENDENT hai (har horizon ko alag-alag
@@ -1184,16 +1226,12 @@ def _compute_first_event_outcome(df, anchor_time, break_direction, entry_price, 
     WIN_1R / LOSS_SL / TIMEOUT / AMBIGUOUS.
 
     NO LOOK-AHEAD: sirf anchor_time (confirmation-candle time) ke BAAD
-    wali candles use hoti hain. Entry/SL/direction sab pehle se fixed
-    hain (existing entry logic se) — yahan sirf outcome track ho raha
-    hai, koi entry-time feature (RVOL/Price_Position/Touch/Body%/
-    Candle_Color/Trend) yahan calculate/change nahi hoti.
+    wali candles use hoti hain.
 
-    SAME-CANDLE RULE (explicit, jaanbujhkar existing
-    _analyze_trade_outcome()'s SL-first convention se ALAG): agar ek
-    hi future candle ke High/Low range mein Target aur SL dono aa
-    jaayein, to intrabar order OHLC se pata nahi chal sakta — is case
-    mein AMBIGUOUS record hota hai (koi SL-first assumption nahi).
+    SAME-CANDLE RULE (jaanbujhkar existing _analyze_trade_outcome()'s
+    SL-first convention se ALAG): agar ek hi future candle ke High/Low
+    range mein Target aur SL dono aa jaayein, AMBIGUOUS record hota
+    hai (koi SL-first assumption nahi).
 
     Return: dict with keys:
         outcome_1r, outcome_time, target_1r_price, r_distance,
@@ -1235,7 +1273,6 @@ def _compute_first_event_outcome(df, anchor_time, break_direction, entry_price, 
         low = float(cand["Low"])
         cand_time = cand["_t"]
 
-        # Running MFE/MAE — independent of first-event, tracked every candle in window.
         if is_long:
             best_favorable_extreme = max(best_favorable_extreme, high)
             worst_adverse_extreme = min(worst_adverse_extreme, low)
@@ -1284,7 +1321,6 @@ def _compute_first_event_outcome(df, anchor_time, break_direction, entry_price, 
             }
         # neither touched this candle -> continue walking window
 
-    # Window khatam ho gayi, na target na SL hit hua -> TIMEOUT
     mfe_pct, mae_pct = _pct_moves(entry_price, best_favorable_extreme, worst_adverse_extreme, is_long)
     return {
         "outcome_1r": "TIMEOUT",
@@ -1300,16 +1336,15 @@ def _compute_first_event_outcome(df, anchor_time, break_direction, entry_price, 
 
 # ============================================
 # STAGE 3: PENDING (confirmed) setups resolve karna
-#          (future 15/30/45/60/90/120 min outcome nikaalna, anchor =
-#           confirmation/next-candle ka time)
-#
-# v4.2: ab existing per-horizon outcome ke saath-saath naya
-# first-event outcome (WIN_1R/LOSS_SL/TIMEOUT/AMBIGUOUS) + MFE_120/
-# MAE_120 bhi calculate + append hote hain. Existing logic ka koi
-# hissa modify nahi hua — sirf result_row ke end mein naya data
-# append hua hai.
 # ============================================
 def resolve_pending(dry_run=False):
+    """
+    v4.5: Market_Regime/Regime_Score/Regime_Lookback/Trend_Direction
+    sirf AAGE CARRY hote hain (Pending row mein already the) — yahan
+    koi naya regime-calc nahi hota, sirf row-se-row copy hota hai.
+    Baaki poora outcome-tracking logic (SL-first + first-event +
+    MFE/MAE) bilkul unchanged hai.
+    """
     pending_ws = _get_pending_worksheet()
     records = pending_ws.get_all_records()
     if not records:
@@ -1433,7 +1468,7 @@ def resolve_pending(dry_run=False):
         for rr in TARGET_RR:
             result_row.append("YES" if outcome["target_hit"][rr] else "NO")
 
-        # ---- NAYA (v4.2): FIRST-EVENT outcome (independent of per-horizon booleans above) ----
+        # ---- FIRST-EVENT outcome (v4.2, unchanged) ----
         first_event = _compute_first_event_outcome(
             df, anchor_time, break_direction, entry_price, stop_loss,
             horizon_minutes=FIRST_EVENT_HORIZON_MINUTES,
@@ -1446,6 +1481,12 @@ def resolve_pending(dry_run=False):
         result_row.append(first_event["outcome_status"])
         result_row.append(first_event["mfe_pct"])
         result_row.append(first_event["mae_pct"])
+
+        # ---- NAYA (v4.5): regime carry-forward (Confusion_Pending se) ----
+        result_row.append(row.get("Market_Regime", ""))
+        result_row.append(row.get("Regime_Score", ""))
+        result_row.append(row.get("Regime_Lookback", ""))
+        result_row.append(row.get("Trend_Direction", ""))
 
         pct_by_horizon = dict(zip(HORIZONS_MINUTES, pct_changes))
         resolved_msg = _build_resolved_message(
@@ -1465,7 +1506,7 @@ def resolve_pending(dry_run=False):
             print(f"  [sr_shape_tracker][DRY_RUN] RESOLVED: {result_row}")
             print(f"  [sr_shape_tracker][DRY_RUN]   First-event: {first_event['outcome_1r']} "
                   f"@ {first_event['outcome_time']} | MFE_120={first_event['mfe_pct']}% "
-                  f"MAE_120={first_event['mae_pct']}%")
+                  f"MAE_120={first_event['mae_pct']}% | Regime={row.get('Market_Regime', '')}")
         else:
             try:
                 _get_results_worksheet().append_row(result_row, table_range="A1")
@@ -1501,6 +1542,11 @@ def resolve_pending(dry_run=False):
                 r.get("Stop_Loss", ""),
                 r.get("SL_Distance_Pct", ""),
                 "PENDING",
+                # ---- NAYA (v4.5): regime fields (preserved on rewrite) ----
+                r.get("Market_Regime", ""),
+                r.get("Regime_Score", ""),
+                r.get("Regime_Lookback", ""),
+                r.get("Trend_Direction", ""),
             ] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)
@@ -1516,7 +1562,7 @@ def resolve_pending(dry_run=False):
 
 
 # ============================================
-# NAYA (v4.2): BACKTEST SUMMARY (read-only, standalone)
+# BACKTEST SUMMARY (v4.2, read-only, standalone — unchanged)
 # ============================================
 def _avg_field(rows, field):
     vals = []
@@ -1604,16 +1650,13 @@ def _near_support(row):
 
 def generate_backtest_summary(v_filters=True):
     """
-    NAYA (v4.2) — READ-ONLY summary function.
+    READ-ONLY summary function (unchanged).
 
     Confusion_Backtest_Data se saari resolved rows padhta hai (kisi
     bhi tracking-flow/pending-state ko touch nahi karta) aur print
     karta hai:
         1. Overall summary (saare confirmed LONG/SHORT setups)
-        2. V1/V2/V3 candidate-strategy breakdown (agar v_filters=True):
-             V1: RVOL20 2-3 + Touch 2-3 + Body <20% + NEAR_RESISTANCE
-             V2: RVOL20 2-3 + Body <20% + NEAR_RESISTANCE
-             V3: RVOL20 2-3 + Touch 2-3 + NEAR_RESISTANCE
+        2. V1/V2/V3 candidate-strategy breakdown (agar v_filters=True)
 
     Chalane ka tarika:
         python -c "import sr_shape_outcome_tracker as t; t.generate_backtest_summary()"
@@ -1641,7 +1684,6 @@ def generate_backtest_summary(v_filters=True):
     _print_stats_block(v2_rows, "V2: + Body <20% (no touch filter)")
     _print_stats_block(v3_rows, "V3: + Touch 2-3 (no body filter)")
 
-    # ---- NAYA: V4/V5/V6 — same conditions, NEAR_SUPPORT ke against ----
     v4_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _body_lt_20(r) and _near_support(r)]
     v5_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _body_lt_20(r) and _near_support(r)]
     v6_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _near_support(r)]
@@ -1655,14 +1697,61 @@ def generate_backtest_summary(v_filters=True):
 
 
 # ============================================
-# NAYA (v4.3): SEPARATE STRATEGY-REPORT SHEET (V1/V2/V3)
+# NAYA (v4.5): MARKET REGIME ANALYSIS (read-only, standalone)
 # ============================================
-# Yeh EK ALAG worksheet hai — existing Awaiting/Pending/Backtest_Data
-# tabs se bilkul independent. Isko likhne/update karne se woh purana
-# system (jo already chal raha hai: process_candle, resolve_confirmations,
-# resolve_pending) BILKUL touch nahi hota — yeh function sirf
-# Confusion_Backtest_Data ko READ karta hai, aur apna result is naye
-# tab mein WRITE karta hai. Purana system waisa hi chalta rehta hai.
+def generate_regime_analysis():
+    """
+    READ-ONLY. Confusion_Backtest_Data se resolved rows padhta hai
+    aur Market_Regime ke hisaab se V5 performance compare karta hai:
+    UP_TREND vs DOWN_TREND vs CHOPPY. Plus WIN vs LOSS ka regime
+    distribution side-by-side.
+
+    Yeh sirf ANALYSIS hai — koi filter nahi lagata, koi V5 tracking-
+    flow touch nahi karta.
+
+    Chalane ka tarika:
+        python -c "import sr_shape_outcome_tracker as t; t.generate_regime_analysis()"
+    """
+    ws = _get_results_worksheet()
+    records = ws.get_all_records()
+    resolved = [r for r in records if r.get("Outcome_1R") in ("WIN_1R", "LOSS_SL", "TIMEOUT", "AMBIGUOUS")]
+
+    print("=" * 60)
+    print("V5 PERFORMANCE BY MARKET REGIME")
+    print("=" * 60)
+
+    regime_labels = ["UP_TREND", "DOWN_TREND", "CHOPPY"]
+    for label in regime_labels:
+        rows = [r for r in resolved if r.get("Market_Regime") == label]
+        _print_stats_block(rows, label)
+
+    wins = [r for r in resolved if r.get("Outcome_1R") == "WIN_1R"]
+    losses = [r for r in resolved if r.get("Outcome_1R") == "LOSS_SL"]
+
+    def _distribution(rows):
+        total = len(rows)
+        dist = {}
+        for label in regime_labels:
+            n = sum(1 for r in rows if r.get("Market_Regime") == label)
+            dist[label] = (n, round(n / total * 100, 2) if total else None)
+        return dist
+
+    print("\n" + "=" * 60)
+    print("REGIME DISTRIBUTION: WIN vs LOSS")
+    print("=" * 60)
+    win_dist = _distribution(wins)
+    loss_dist = _distribution(losses)
+    print(f"\nWIN_1R (N={len(wins)}):")
+    for label, (n, pct) in win_dist.items():
+        print(f"  {label}: {n} ({pct}%)")
+    print(f"\nLOSS_SL (N={len(losses)}):")
+    for label, (n, pct) in loss_dist.items():
+        print(f"  {label}: {n} ({pct}%)")
+
+
+# ============================================
+# SEPARATE STRATEGY-REPORT SHEET (V1-V6) — v4.3, unchanged
+# ============================================
 STRATEGY_REPORT_WORKSHEET_NAME = "Confusion_Strategy_Report"
 
 STRATEGY_REPORT_STATS_FIELDS = [
@@ -1671,9 +1760,6 @@ STRATEGY_REPORT_STATS_FIELDS = [
     "Avg_R", "Avg_MFE_120", "Avg_MAE_120",
 ]
 
-# Raw-row section header — same fields jo Confusion_Backtest_Data mein
-# hain (koi naya field nahi banaya, sirf ek "Strategy" tag column extra
-# hai taaki pata chale kaunsi row V1/V2/V3 mein se kis mein aayi).
 STRATEGY_REPORT_ROW_HEADER = ["Strategy"] + RESULTS_HEADER
 
 
@@ -1705,38 +1791,12 @@ def _stats_row_for_sheet(label, stats):
 
 def generate_strategy_report_sheet(include_raw_rows=True, dry_run=False):
     """
-    NAYA (v4.3) — Alag, dedicated Google Sheet tab banata/update karta
-    hai (Confusion_Strategy_Report) jisme sirf V1/V2/V3 candidate
-    strategies (jo tumne diye the) ka summary + matching raw rows
-    jaate hain.
+    Dedicated Google Sheet tab (Confusion_Strategy_Report) banata/
+    update karta hai jisme V1-V6 candidate strategies ka summary +
+    matching raw rows jaate hain. Read-only from Confusion_Backtest_Data
+    — existing tracking flow ka koi hissa touch nahi hota.
 
-    V1: RVOL20 2-3 + Touch 2-3 + Body <20% + NEAR_RESISTANCE
-    V2: RVOL20 2-3 + Body <20% + NEAR_RESISTANCE
-    V3: RVOL20 2-3 + Touch 2-3 + NEAR_RESISTANCE
-    V4: RVOL20 2-3 + Touch 2-3 + Body <20% + NEAR_SUPPORT   (NAYA)
-    V5: RVOL20 2-3 + Body <20% + NEAR_SUPPORT               (NAYA)
-    V6: RVOL20 2-3 + Touch 2-3 + NEAR_SUPPORT               (NAYA)
-
-    IMPORTANT: Yeh function Confusion_Backtest_Data se sirf PADHTA hai
-    (read-only) — existing tracking flow (process_candle /
-    resolve_confirmations / resolve_pending) ka koi hissa touch nahi
-    hota, wo purane jaisa hi chalta rehta hai. Yeh ek total ALAG,
-    optional, on-demand report hai.
-
-    Sheet ka structure (top se neeche):
-        --- SUMMARY ---
-        (header row)
-        V1 stats row
-        V2 stats row
-        V3 stats row
-        (blank row)
-        --- MATCHING SETUPS (RAW ROWS) --- [agar include_raw_rows=True]
-        (header row)
-        ... V1 ki saari matching rows (Strategy=V1 tag ke saath) ...
-        ... V2 ki saari matching rows (Strategy=V2 tag ke saath) ...
-        ... V3 ki saari matching rows (Strategy=V3 tag ke saath) ...
-
-    Chalane ka tarika (jab bhi chaho, standalone — cron/scan se alag):
+    Chalane ka tarika:
         python -c "import sr_shape_outcome_tracker as t; t.generate_strategy_report_sheet()"
     """
     results_ws = _get_results_worksheet()
@@ -1746,7 +1806,6 @@ def generate_strategy_report_sheet(include_raw_rows=True, dry_run=False):
     v1_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _body_lt_20(r) and _near_resistance(r)]
     v2_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _body_lt_20(r) and _near_resistance(r)]
     v3_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _near_resistance(r)]
-    # ---- NAYA: V4/V5/V6 — same conditions, NEAR_SUPPORT ke against ----
     v4_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _body_lt_20(r) and _near_support(r)]
     v5_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _body_lt_20(r) and _near_support(r)]
     v6_rows = [r for r in resolved if _in_rvol_2_3_band(r) and _touch_2_3(r) and _near_support(r)]
@@ -1798,11 +1857,13 @@ def generate_strategy_report_sheet(include_raw_rows=True, dry_run=False):
 # LOCAL TESTING
 # ============================================
 if __name__ == "__main__":
-    print("sr_shape_outcome_tracker (v4.2) — standalone test run")
+    print("sr_shape_outcome_tracker (v4.5) — standalone test run")
     print(f"Horizons: {HORIZONS_MINUTES} min => candles {HORIZONS_CANDLES}")
     print(f"MIN_SR_TOUCHES = {MIN_SR_TOUCHES} (soft floor, not a hard reliability filter)")
     print(f"RVOL gate: RVOL_20 >= {RVOL_SHORT_THRESHOLD} OR RVOL_96 >= {RVOL_LONG_THRESHOLD}")
     print(f"TARGET_RR = {TARGET_RR}")
     print(f"First-event horizon: {FIRST_EVENT_HORIZON_MINUTES} min")
+    print(f"Market regime: default_lookback={market_regime.DEFAULT_LOOKBACK}, "
+          f"threshold={market_regime.TREND_SCORE_THRESHOLD} (analysis-only, no filter)")
     resolve_confirmations(dry_run=True)
     resolve_pending(dry_run=True)

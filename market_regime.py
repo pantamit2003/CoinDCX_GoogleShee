@@ -41,8 +41,8 @@ from support_resistance import find_swing_points
 # ============================================
 # CONFIG (tuning ke liye — V5 historical data pe test karke adjust karo)
 # ============================================
-DEFAULT_LOOKBACK = 40          # ~10 ghante ka 15m data (32-48 range ke beech)
-MIN_LOOKBACK = 20              # isse kam candles ho to reliable score nahi ban sakta
+DEFAULT_LOOKBACK = 10         # ~10 ghante ka 15m data (32-48 range ke beech)
+MIN_LOOKBACK = 10              # isse kam candles ho to reliable score nahi ban sakta
 
 TREND_SCORE_THRESHOLD = 0.30   # |Regime_Score| >= isse -> TREND, warna CHOPPY
 

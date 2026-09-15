@@ -1,7 +1,7 @@
 """
 market_regime.py
 ==================
-NAYA STANDALONE MODULE — sirf market regime classify karta hai
+STANDALONE MODULE — sirf market regime classify karta hai
 (UP_TREND / DOWN_TREND / CHOPPY). Koi API call nahi karta, koi
 Google Sheet nahi chhuta, koi V5 logic touch nahi karta.
 
@@ -14,9 +14,9 @@ nahi hoti.
 
 NO LOOKAHEAD (critical):
 Is module ko jo bhi df diya jaaye, use assume karta hai ki caller ne
-PEHLE HI future/confirmation/confusion candle EXCLUDE kar di hai.
-Yeh module khud kuch bhi "future" nahi dekhta — sirf jo df milta hai
-uski TAIL (sabse recent, sabse aakhri rows) use karta hai.
+PEHLE HI confusion candle aur future/confirmation candle EXCLUDE kar
+di hai. Yeh module khud kuch bhi "future" nahi dekhta — sirf jo df
+milta hai uski TAIL (sabse recent, sabse aakhri rows) use karta hai.
 
 APPROACH (simple, interpretable — koi RSI/ADX/heavy indicators nahi):
 Teen chhote, samajhne-laayak components combine kiye hain:
@@ -32,24 +32,43 @@ Teeno ko weighted-average karke ek continuous Regime_Score (-1 to +1)
 milta hai. Sign = direction, magnitude = trend-strength/choppiness.
 Threshold cross karne par UP_TREND/DOWN_TREND, warna CHOPPY.
 
-Thresholds abhi conservative defaults hain — V5 historical data pe
-tune karne ke liye module-level constants rakhe hain, taaki baad mein
-sirf yahan ek number badalna ho, poora system dobara likhna na pade.
+TWO-LAYER REGIME (additive — koi existing formula change nahi hua):
+  1. RECENT REGIME (existing, unchanged formula/weights/thresholds)
+     — last DEFAULT_LOOKBACK (5) candles, confusion candle se PEHLE
+     ki sabse recent candles. "Abhi immediately market kis condition
+     mein hai."
+  2. BACKGROUND REGIME (NAYA) — usi existing classify_market_regime()
+     formula ko REUSE karke, ek ALAG window par: recent 5 candles se
+     PEHLE ki 15 candles (recent candles background window mein
+     INCLUDE nahi hoti, koi overlap nahi). "Is recent movement se
+     pehle broader short-term trend kya tha."
+     Koi naya scoring formula, koi naya threshold introduce nahi
+     hua — sirf input-window alag hai.
+
+Thresholds/weights abhi conservative defaults hain — V5 historical
+data pe tune karne ke liye module-level constants rakhe hain, taaki
+baad mein sirf yahan number badalna ho, poora system dobara likhna
+na pade.
 """
 from support_resistance import find_swing_points
 
 # ============================================
 # CONFIG (tuning ke liye — V5 historical data pe test karke adjust karo)
 # ============================================
-DEFAULT_LOOKBACK = 5       # ~10 ghante ka 15m data (32-48 range ke beech)
-MIN_LOOKBACK = 5              # isse kam candles ho to reliable score nahi ban sakta
+# ---- RECENT regime (existing, unchanged) ----
+DEFAULT_LOOKBACK = 5
+MIN_LOOKBACK = 5
 
 TREND_SCORE_THRESHOLD = 0.30   # |Regime_Score| >= isse -> TREND, warna CHOPPY
 
-# Component weights (sum = 1.0) — start simple, baad mein tune karna
+# Component weights (sum = 1.0) — existing, unchanged
 WEIGHT_EFFICIENCY = 0.5
 WEIGHT_STRUCTURE = 0.3
 WEIGHT_CONSISTENCY = 0.2
+
+# ---- NAYA: BACKGROUND regime (additive, same formula, alag window) ----
+BACKGROUND_LOOKBACK = 15       # ~3h45m on 15m timeframe
+BACKGROUND_MIN_LOOKBACK = 15
 
 
 def _trend_of_sequence(seq):
@@ -90,14 +109,15 @@ def _insufficient_result(actual_lookback):
 
 def classify_market_regime(df, lookback=DEFAULT_LOOKBACK, min_lookback=MIN_LOOKBACK):
     """
+    EXISTING FUNCTION — UNCHANGED FORMULA/WEIGHTS/THRESHOLDS.
+
     df: candle dataframe (Open/High/Low/Close columns) — CALLER KI
         ZIMMEDARI hai ki isme confusion/confirmation/future candle na
         ho. Yeh function sirf df ki last `lookback` rows use karta hai.
-    lookback: kitni pichli candles use karni hain (default 40, 32-48
-        range ke beech).
-    min_lookback: isse kam data mile to reliable regime nahi bana
-        sakte — INSUFFICIENT_DATA return hota hai (bahut naya pair ya
-        data-gap ka rare edge case).
+    lookback: kitni pichli candles use karni hain.
+    min_lookback: isse kam candles ho to reliable score nahi ban sakta
+        — INSUFFICIENT_DATA return hota hai (rare edge case: bahut
+        naya pair ya data-gap).
 
     Return: dict:
         {
@@ -176,6 +196,58 @@ def classify_market_regime(df, lookback=DEFAULT_LOOKBACK, min_lookback=MIN_LOOKB
 
 
 # ============================================
+# NAYA (additive): RECENT + BACKGROUND REGIME (dono ek call mein)
+# ============================================
+def classify_recent_and_background_regime(
+    df,
+    recent_lookback=DEFAULT_LOOKBACK,
+    background_lookback=BACKGROUND_LOOKBACK,
+):
+    """
+    NAYA — additive helper. Existing classify_market_regime() ko HI
+    reuse karta hai, do baar, do ALAG (NON-OVERLAPPING) windows par:
+
+      1. RECENT     = df ki last `recent_lookback` (5) candles.
+      2. BACKGROUND = un recent candles se PEHLE ki `background_lookback`
+                      (15) candles — recent window ke saath koi overlap
+                      nahi.
+
+    Example (confusion candle @ 18:00, 15-min candles):
+        Background: 13:15 -> 16:45  (15 candles)
+        Recent:     17:00 -> 17:45  (5 candles)
+        Current:    18:00 confusion candle (na Recent na Background mein)
+
+    df: caller (process_candle) se already confusion-candle-EXCLUDED
+        df milna chahiye (jaisa classify_market_regime() mein hota
+        hai) — yahan bhi wahi guarantee zaroori hai: is function ko
+        jo df diya jaaye usme confusion/confirmation/future candle
+        NA ho.
+
+    Return: (recent_result: dict, background_result: dict)
+        dono dicts classify_market_regime() jaisi hi shape ke hain.
+    """
+    recent_result = classify_market_regime(
+        df, lookback=recent_lookback, min_lookback=recent_lookback
+    )
+
+    # Background window = recent window ko chhod kar, usse PEHLE ki
+    # candles. Recent candles background mein kabhi include nahi
+    # hoti — isliye df ke end se `recent_lookback` candles pehle hi
+    # hata di jaati hain, phir usme se background_lookback li jaati hai.
+    if df is None or df.empty:
+        background_df = df
+    else:
+        cutoff = len(df) - recent_lookback
+        background_df = df.iloc[:max(cutoff, 0)]
+
+    background_result = classify_market_regime(
+        background_df, lookback=background_lookback, min_lookback=background_lookback
+    )
+
+    return recent_result, background_result
+
+
+# ============================================
 # LOCAL TESTING
 # ============================================
 if __name__ == "__main__":
@@ -184,22 +256,32 @@ if __name__ == "__main__":
 
     print("market_regime.py — standalone smoke test")
 
-    # Synthetic uptrend
     n = 50
     up_closes = np.linspace(100, 120, n) + np.random.normal(0, 0.3, n)
     up_df = pd.DataFrame({
         "Open": up_closes, "High": up_closes + 0.5,
         "Low": up_closes - 0.5, "Close": up_closes,
     })
-    print("Synthetic UP series:", classify_market_regime(up_df))
+    print("Synthetic UP series (recent only):", classify_market_regime(up_df))
 
-    # Synthetic choppy/range
     choppy_closes = 100 + np.sin(np.linspace(0, 15, n)) * 2 + np.random.normal(0, 0.3, n)
     choppy_df = pd.DataFrame({
         "Open": choppy_closes, "High": choppy_closes + 0.5,
         "Low": choppy_closes - 0.5, "Close": choppy_closes,
     })
-    print("Synthetic CHOPPY series:", classify_market_regime(choppy_df))
+    print("Synthetic CHOPPY series (recent only):", classify_market_regime(choppy_df))
 
-    # Insufficient data
-    print("Insufficient data:", classify_market_regime(up_df.head(5)))
+    print("Insufficient data (recent):", classify_market_regime(up_df.head(3)))
+
+    recent, background = classify_recent_and_background_regime(up_df)
+    print("Recent regime (UP series):", recent)
+    print("Background regime (UP series):", background)
+
+    recent_c, background_c = classify_recent_and_background_regime(choppy_df)
+    print("Recent regime (CHOPPY series):", recent_c)
+    print("Background regime (CHOPPY series):", background_c)
+
+    # Insufficient background (df bahut chhota hai, 15 candles background ke liye kaafi nahi)
+    small_df = up_df.head(10)
+    r_small, b_small = classify_recent_and_background_regime(small_df)
+    print("Small df -> Recent:", r_small, "| Background:", b_small)

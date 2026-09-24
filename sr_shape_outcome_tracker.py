@@ -174,6 +174,7 @@ from google.oauth2.service_account import Credentials
 from data.candles import get_candles
 from support_resistance import get_support_resistance, classify_price_position
 from candle_shape import classify_candle_shape
+from data.order_flow import get_order_flow_snapshot
 from notifications.telegram_bot import send_confusion_telegram_message  # teesra, alag bot
 import market_regime   # RVOL-independent, no-lookahead regime label (recent + background)
 import config
@@ -259,6 +260,10 @@ PENDING_HEADER = [
     # ---- NAYA (v4.6): background market regime ----
     "Background_Regime", "Background_Regime_Score",
     "Background_Regime_Lookback", "Background_Trend_Direction",
+    # ---- NAYA: Order Flow / Delta snapshot (breakout confirmation ke waqt liya gaya) ----
+    "Aggressive_Buy_Volume", "Aggressive_Sell_Volume", "Delta", "Delta_Pct",
+    "Order_Flow_Sample_Size", "Order_Flow_Span_Seconds",
+    "Aggressive_Trade_Count", "Order_Flow_Error",
 ]
 
 RESULTS_HEADER = (
@@ -283,6 +288,10 @@ RESULTS_HEADER = (
     # ---- NAYA (v4.6): background market regime ----
     + ["Background_Regime", "Background_Regime_Score",
        "Background_Regime_Lookback", "Background_Trend_Direction"]
+    # ---- NAYA: Order Flow / Delta snapshot ----
+    + ["Aggressive_Buy_Volume", "Aggressive_Sell_Volume", "Delta", "Delta_Pct",
+       "Order_Flow_Sample_Size", "Order_Flow_Span_Seconds",
+       "Aggressive_Trade_Count", "Order_Flow_Error"]
 )
 
 # ============================================
@@ -930,6 +939,8 @@ def resolve_confirmations(dry_run=False):
                 # ---- NAYA (v4.6): background regime fields (carried) ----
                 + [common_fields["background_regime_label"], common_fields["background_regime_score"],
                    common_fields["background_regime_lookback"], common_fields["background_trend_direction"]]
+                # ---- NAYA: Order Flow fields (NO_CONFIRMATION ke liye kabhi fetch nahi hote) ----
+                + ["", "", "", "", 0, "", 0, ""]
             )
             if dry_run:
                 print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION (CLOSED): {pair} @ {row['Candle_Time']}")
@@ -965,7 +976,22 @@ def resolve_confirmations(dry_run=False):
             continue
 
         confirmed_count += 1
+        # ---- NAYA: Order Flow snapshot — SIRF confirmed LONG/SHORT ----
+        # ke liye fetch hota hai. NO_CONFIRMATION setups ke liye yeh
+        # call kabhi nahi hoti — unnecessary API calls avoid karne ke
+        # liye. Failure-safe: koi bhi error V5 flow ko break nahi karti.
+        try:
+            order_flow = get_order_flow_snapshot(pair)
+        except Exception as e:
+            print(f"  [sr_shape_tracker] {pair} order flow error: {e}")
+            order_flow = {
+                "Aggressive_Buy_Volume": None, "Aggressive_Sell_Volume": None,
+                "Delta": None, "Delta_Pct": None, "Order_Flow_Sample_Size": 0,
+                "Order_Flow_Span_Seconds": None, "Aggressive_Trade_Count": 0,
+                "Order_Flow_Error": f"unexpected: {e}",
+            }
 
+        
         if dry_run:
             print(f"  [sr_shape_tracker][DRY_RUN] {pair} CONFIRMED {break_direction}: "
                   f"entry={entry_price} sl={stop_loss} ({sl_distance_pct}%) "
@@ -1007,6 +1033,15 @@ def resolve_confirmations(dry_run=False):
                 row.get("Background_Regime_Score", ""),
                 row.get("Background_Regime_Lookback", ""),
                 row.get("Background_Trend_Direction", ""),
+                # ---- NAYA: Order Flow fields ----
+                order_flow["Aggressive_Buy_Volume"] if order_flow["Aggressive_Buy_Volume"] is not None else "",
+                order_flow["Aggressive_Sell_Volume"] if order_flow["Aggressive_Sell_Volume"] is not None else "",
+                order_flow["Delta"] if order_flow["Delta"] is not None else "",
+                order_flow["Delta_Pct"] if order_flow["Delta_Pct"] is not None else "",
+                order_flow["Order_Flow_Sample_Size"],
+                order_flow["Order_Flow_Span_Seconds"] if order_flow["Order_Flow_Span_Seconds"] is not None else "",
+                order_flow["Aggressive_Trade_Count"],
+                order_flow["Order_Flow_Error"],
             ], table_range="A1")
             try:
                 confirm_msg = _build_confirmation_message(
@@ -1556,6 +1591,15 @@ def resolve_pending(dry_run=False):
         result_row.append(row.get("Background_Regime_Score", ""))
         result_row.append(row.get("Background_Regime_Lookback", ""))
         result_row.append(row.get("Background_Trend_Direction", ""))
+        # ---- NAYA: Order Flow carry-forward (Confusion_Pending se, ek baar hi liya gaya tha) ----
+        result_row.append(row.get("Aggressive_Buy_Volume", ""))
+        result_row.append(row.get("Aggressive_Sell_Volume", ""))
+        result_row.append(row.get("Delta", ""))
+        result_row.append(row.get("Delta_Pct", ""))
+        result_row.append(row.get("Order_Flow_Sample_Size", ""))
+        result_row.append(row.get("Order_Flow_Span_Seconds", ""))
+        result_row.append(row.get("Aggressive_Trade_Count", ""))
+        result_row.append(row.get("Order_Flow_Error", ""))
 
         pct_by_horizon = dict(zip(HORIZONS_MINUTES, pct_changes))
         resolved_msg = _build_resolved_message(
@@ -1622,6 +1666,11 @@ def resolve_pending(dry_run=False):
                 r.get("Background_Regime_Score", ""),
                 r.get("Background_Regime_Lookback", ""),
                 r.get("Background_Trend_Direction", ""),
+                # ---- NAYA: Order Flow fields (preserved on rewrite) ----
+                r.get("Aggressive_Buy_Volume", ""), r.get("Aggressive_Sell_Volume", ""),
+                r.get("Delta", ""), r.get("Delta_Pct", ""),
+                r.get("Order_Flow_Sample_Size", ""), r.get("Order_Flow_Span_Seconds", ""),
+                r.get("Aggressive_Trade_Count", ""), r.get("Order_Flow_Error", ""),
             ] for r in still_pending]
             pending_ws.clear()
             pending_ws.update([PENDING_HEADER] + clean_rows)

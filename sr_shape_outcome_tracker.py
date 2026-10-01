@@ -790,43 +790,59 @@ def process_candle(pair, df, dry_run=False):
 # ============================================
 # STAGE 2: IMMEDIATELY NEXT CANDLE se breakout direction CONFIRM karna
 # ============================================
-def resolve_confirmations(dry_run=False):
+def resolve_confirmations(dry_run=False, send_individual_telegram=True):
     """
     Confusion_Awaiting_Confirmation sheet mein har AWAITING_CONFIRMATION
     row ke liye, us candle ke IMMEDIATELY BAAD wali (aur sirf usi) candle
     dhoondhta hai:
-        Next candle High > Confusion High         -> LONG
-        Next candle Low  < Confusion Low          -> SHORT
-        Dono break (ambiguous) ya koi nahi break  -> NO_CONFIRMATION
+
+        Next candle High > Confusion High -> LONG
+        Next candle Low  < Confusion Low  -> SHORT
+        Dono break (ambiguous) ya koi nahi break -> NO_CONFIRMATION
 
     LONG/SHORT confirm hone par Confusion_Pending mein daal deta hai
     (outcome-tracking ke liye).
 
-    NO_CONFIRMATION seedha Confusion_Backtest_Data mein blank-outcome
-    row ke saath record ho jaata hai (taaki pata chale kitni baar
-    confirmation nahi milta), aur us candle ko is function ke baad
-    kabhi dobara process NAHI kiya jaata.
+    V5 LIVE SCANNER ke liye confirmed setups ki list bhi return karta hai,
+    taaki live_v5_scanner.py unmein se sirf EK setup select kar sake.
 
-    v4.5/v4.6: Market_Regime/Regime_Score/Regime_Lookback/
-    Trend_Direction aur Background_Regime/Background_Regime_Score/
-    Background_Regime_Lookback/Background_Trend_Direction sirf AAGE
-    CARRY hote hain (Awaiting row mein already calculate ho chuke the
-    process_candle() mein) — yahan koi naya regime-calc nahi hota,
-    sirf row-se-row copy hota hai.
+    send_individual_telegram=False hone par individual Confusion-bot
+    confirmation alert suppress hota hai. Purana behavior default mein
+    unchanged hai (True).
+
+    NO_CONFIRMATION seedha Confusion_Backtest_Data mein blank-outcome
+    row ke saath record ho jaata hai.
+
+    Market regime aur background regime fields sirf carry-forward hote hain.
+    Yahan koi naya regime calculation nahi hota.
+
+    Order Flow sirf confirmed LONG/SHORT setups ke liye fetch hota hai.
     """
+
     awaiting_ws = _get_awaiting_worksheet()
     records = awaiting_ws.get_all_records()
+
     if not records:
         print("  [sr_shape_tracker] Koi awaiting-confirmation candle nahi hai.")
-        return
+        return []
 
     now_utc = datetime.now(timezone.utc)
-    pairs_needed = {r["Pair"] for r in records if str(r.get("Status", "")).upper() == "AWAITING_CONFIRMATION"}
+
+    pairs_needed = {
+        r["Pair"]
+        for r in records
+        if str(r.get("Status", "")).upper() == "AWAITING_CONFIRMATION"
+    }
 
     candle_cache = {}
+
     for pair in pairs_needed:
         try:
-            candle_cache[pair] = get_candles(pair=pair, resolution=RESOLUTION, days=2)
+            candle_cache[pair] = get_candles(
+                pair=pair,
+                resolution=RESOLUTION,
+                days=2
+            )
         except Exception as e:
             print(f"  [sr_shape_tracker] {pair} candles fetch error: {e}")
             candle_cache[pair] = None
@@ -836,31 +852,67 @@ def resolve_confirmations(dry_run=False):
     no_confirmation_count = 0
     discarded_count = 0
 
+    # ============================================================
+    # V5 LIVE SCANNER ke liye confirmed setups collect honge
+    # ============================================================
+    confirmed_setups = []
+
     for row in records:
+
         if str(row.get("Status", "")).upper() != "AWAITING_CONFIRMATION":
             continue
 
         pair = row["Pair"]
+
         candle_time = _ist_str_to_utc_dt(row["Candle_Time"])
+
         confusion_high = float(row["Candle_High"])
         confusion_low = float(row["Candle_Low"])
         close = float(row["Close"])
+
         rvol_20_raw = row.get("RVOL_20", "")
         rvol_96_raw = row.get("RVOL_96", "")
-        rvol_20 = float(rvol_20_raw) if rvol_20_raw not in ("", None) else None
-        rvol_96 = float(rvol_96_raw) if rvol_96_raw not in ("", None) else None
 
+        rvol_20 = (
+            float(rvol_20_raw)
+            if rvol_20_raw not in ("", None)
+            else None
+        )
+
+        rvol_96 = (
+            float(rvol_96_raw)
+            if rvol_96_raw not in ("", None)
+            else None
+        )
+
+        # ========================================================
+        # STALE CHECK
+        # ========================================================
         if now_utc - candle_time > timedelta(hours=MAX_AGE_HOURS):
-            print(f"  [sr_shape_tracker] {pair} @ {row['Candle_Time']} stale (awaiting), discard.")
+            print(
+                f"  [sr_shape_tracker] {pair} @ {row['Candle_Time']} "
+                f"stale (awaiting), discard."
+            )
             discarded_count += 1
             continue
 
+        # ========================================================
+        # CANDLE DATA
+        # ========================================================
         df = candle_cache.get(pair)
+
         if df is None or df.empty:
             still_awaiting.append(row)
             continue
 
-        found_next, next_row = _find_next_candle(df, candle_time)
+        # ========================================================
+        # IMMEDIATELY NEXT CANDLE
+        # ========================================================
+        found_next, next_row = _find_next_candle(
+            df,
+            candle_time
+        )
+
         if not found_next:
             still_awaiting.append(row)
             continue
@@ -869,232 +921,829 @@ def resolve_confirmations(dry_run=False):
         next_high = float(next_row["High"])
         next_low = float(next_row["Low"])
 
+        # ========================================================
+        # BREAK DETECTION
+        # ========================================================
         broke_high = next_high > confusion_high
         broke_low = next_low < confusion_low
 
         if broke_high and broke_low:
             break_direction = "NO_CONFIRMATION"
+
         elif broke_high:
             break_direction = "LONG"
+
         elif broke_low:
             break_direction = "SHORT"
+
         else:
             break_direction = "NO_CONFIRMATION"
 
+        # ========================================================
+        # COMMON FIELDS
+        # ========================================================
         common_fields = dict(
             pair=pair,
             candle_time_str=row["Candle_Time"],
             candle_color=row["Candle_Color"],
             close=close,
+
             rvol_20=rvol_20,
             rvol_96=rvol_96,
-            price_position=row.get("Price_Position", "UNKNOWN"),
-            sr_level_price=row.get("SR_Level_Price", ""),
-            sr_touch_count=row.get("SR_Touch_Count", 0),
-            candle_shape=row.get("Candle_Shape", "UNKNOWN"),
-            shape_strength=row.get("Shape_Strength", ""),
-            body_pct=row.get("Body_Pct", ""),
-            rejection_side=row.get("Rejection_Side", ""),
+
+            price_position=row.get(
+                "Price_Position",
+                "UNKNOWN"
+            ),
+
+            sr_level_price=row.get(
+                "SR_Level_Price",
+                ""
+            ),
+
+            sr_touch_count=row.get(
+                "SR_Touch_Count",
+                0
+            ),
+
+            candle_shape=row.get(
+                "Candle_Shape",
+                "UNKNOWN"
+            ),
+
+            shape_strength=row.get(
+                "Shape_Strength",
+                ""
+            ),
+
+            body_pct=row.get(
+                "Body_Pct",
+                ""
+            ),
+
+            rejection_side=row.get(
+                "Rejection_Side",
+                ""
+            ),
+
             confusion_high=confusion_high,
             confusion_low=confusion_low,
             confusion_close=close,
-            next_candle_time_str=_to_ist_str(next_candle_time),
+
+            next_candle_time_str=_to_ist_str(
+                next_candle_time
+            ),
+
             next_high=next_high,
             next_low=next_low,
-            # ---- regime carry-forward fields (recent, v4.5) ----
-            market_regime_label=row.get("Market_Regime", ""),
-            regime_score=row.get("Regime_Score", ""),
-            regime_lookback=row.get("Regime_Lookback", ""),
-            trend_direction=row.get("Trend_Direction", ""),
-            # ---- NAYA (v4.6): background regime carry-forward fields ----
-            background_regime_label=row.get("Background_Regime", ""),
-            background_regime_score=row.get("Background_Regime_Score", ""),
-            background_regime_lookback=row.get("Background_Regime_Lookback", ""),
-            background_trend_direction=row.get("Background_Trend_Direction", ""),
+
+            # ----------------------------------------------------
+            # Recent regime
+            # ----------------------------------------------------
+            market_regime_label=row.get(
+                "Market_Regime",
+                ""
+            ),
+
+            regime_score=row.get(
+                "Regime_Score",
+                ""
+            ),
+
+            regime_lookback=row.get(
+                "Regime_Lookback",
+                ""
+            ),
+
+            trend_direction=row.get(
+                "Trend_Direction",
+                ""
+            ),
+
+            # ----------------------------------------------------
+            # Background regime
+            # ----------------------------------------------------
+            background_regime_label=row.get(
+                "Background_Regime",
+                ""
+            ),
+
+            background_regime_score=row.get(
+                "Background_Regime_Score",
+                ""
+            ),
+
+            background_regime_lookback=row.get(
+                "Background_Regime_Lookback",
+                ""
+            ),
+
+            background_trend_direction=row.get(
+                "Background_Trend_Direction",
+                ""
+            ),
         )
 
+        # ========================================================
+        # NO CONFIRMATION
+        # ========================================================
         if break_direction == "NO_CONFIRMATION":
+
             no_confirmation_count += 1
+
             result_row = (
-                [common_fields["pair"], common_fields["candle_time_str"],
-                 common_fields["candle_color"],
-                 common_fields["close"], common_fields["rvol_20"] if common_fields["rvol_20"] is not None else "",
-                 common_fields["rvol_96"] if common_fields["rvol_96"] is not None else "",
-                 common_fields["price_position"], common_fields["sr_level_price"], common_fields["sr_touch_count"],
-                 common_fields["candle_shape"], common_fields["shape_strength"], common_fields["body_pct"],
-                 common_fields["rejection_side"], common_fields["confusion_high"], common_fields["confusion_low"],
-                 common_fields["confusion_close"], common_fields["next_candle_time_str"],
-                 common_fields["next_high"], common_fields["next_low"],
-                 "NO_CONFIRMATION", "", "", ""]
-                + [""] * len(HORIZONS_MINUTES)   # Price_After_*
-                + [""] * len(HORIZONS_MINUTES)   # PctChg_*
-                + ["", ""]                        # Max favorable/adverse
-                + [""] * len(HORIZONS_MINUTES)   # SL_Hit_*
-                + [""] * len(TARGET_RR)          # Target_*_Hit
-                + ["", "", "", "", "", ""]        # Outcome_1R..Outcome_Status
-                + ["", ""]                        # MFE_120, MAE_120
-                # ---- regime fields (carried, even for NO_CONFIRMATION) ----
-                + [common_fields["market_regime_label"], common_fields["regime_score"],
-                   common_fields["regime_lookback"], common_fields["trend_direction"]]
-                # ---- NAYA (v4.6): background regime fields (carried) ----
-                + [common_fields["background_regime_label"], common_fields["background_regime_score"],
-                   common_fields["background_regime_lookback"], common_fields["background_trend_direction"]]
-                # ---- NAYA: Order Flow fields (NO_CONFIRMATION ke liye kabhi fetch nahi hote) ----
+                [
+                    common_fields["pair"],
+                    common_fields["candle_time_str"],
+                    common_fields["candle_color"],
+                    common_fields["close"],
+
+                    common_fields["rvol_20"]
+                    if common_fields["rvol_20"] is not None
+                    else "",
+
+                    common_fields["rvol_96"]
+                    if common_fields["rvol_96"] is not None
+                    else "",
+
+                    common_fields["price_position"],
+                    common_fields["sr_level_price"],
+                    common_fields["sr_touch_count"],
+                    common_fields["candle_shape"],
+                    common_fields["shape_strength"],
+                    common_fields["body_pct"],
+                    common_fields["rejection_side"],
+                    common_fields["confusion_high"],
+                    common_fields["confusion_low"],
+                    common_fields["confusion_close"],
+                    common_fields["next_candle_time_str"],
+                    common_fields["next_high"],
+                    common_fields["next_low"],
+
+                    "NO_CONFIRMATION",
+                    "",
+                    "",
+                    "",
+                ]
+
+                + [""] * len(HORIZONS_MINUTES)
+                + [""] * len(HORIZONS_MINUTES)
+                + ["", ""]
+                + [""] * len(HORIZONS_MINUTES)
+                + [""] * len(TARGET_RR)
+                + ["", "", "", "", "", ""]
+                + ["", ""]
+
+                # Recent regime
+                + [
+                    common_fields["market_regime_label"],
+                    common_fields["regime_score"],
+                    common_fields["regime_lookback"],
+                    common_fields["trend_direction"],
+                ]
+
+                # Background regime
+                + [
+                    common_fields["background_regime_label"],
+                    common_fields["background_regime_score"],
+                    common_fields["background_regime_lookback"],
+                    common_fields["background_trend_direction"],
+                ]
+
+                # Order Flow
                 + ["", "", "", "", 0, "", 0, ""]
             )
+
             if dry_run:
-                print(f"  [sr_shape_tracker][DRY_RUN] NO_CONFIRMATION (CLOSED): {pair} @ {row['Candle_Time']}")
+
+                print(
+                    f"  [sr_shape_tracker][DRY_RUN] "
+                    f"NO_CONFIRMATION (CLOSED): "
+                    f"{pair} @ {row['Candle_Time']}"
+                )
+
             else:
+
                 try:
-                    _get_results_worksheet().append_row(result_row, table_range="A1")
+
+                    _get_results_worksheet().append_row(
+                        result_row,
+                        table_range="A1"
+                    )
+
                 except Exception as e:
-                    print(f"  [sr_shape_tracker] NO_CONFIRMATION result likhne mein error: {e}")
+
+                    print(
+                        f"  [sr_shape_tracker] "
+                        f"NO_CONFIRMATION result likhne mein error: {e}"
+                    )
+
                     still_awaiting.append(row)
                     continue
+
                 try:
+
                     no_conf_msg = _build_no_confirmation_message(
-                        pair, candle_time, confusion_high, confusion_low,
-                        next_candle_time, next_high, next_low,
+                        pair,
+                        candle_time,
+                        confusion_high,
+                        confusion_low,
+                        next_candle_time,
+                        next_high,
+                        next_low,
                     )
-                    send_confusion_telegram_message(no_conf_msg)
+
+                    send_confusion_telegram_message(
+                        no_conf_msg
+                    )
+
                 except Exception as e:
-                    print(f"  [sr_shape_tracker] Confusion Telegram (no-confirmation) error: {e}")
+
+                    print(
+                        f"  [sr_shape_tracker] "
+                        f"Confusion Telegram "
+                        f"(no-confirmation) error: {e}"
+                    )
+
             continue
 
-        # ---- LONG / SHORT confirmed -> Entry/SL nikaalo ----
-        if break_direction == "LONG":
-            entry_price = confusion_high
-            stop_loss = confusion_low
-            sl_distance_pct = round((entry_price - stop_loss) / entry_price * 100, 3)
-        else:  # SHORT
-            entry_price = confusion_low
-            stop_loss = confusion_high
-            sl_distance_pct = round((stop_loss - entry_price) / entry_price * 100, 3)
+        # ========================================================
+        # LONG / SHORT CONFIRMED
+        # ========================================================
 
+        if break_direction == "LONG":
+
+            entry_price = confusion_high
+
+            stop_loss = confusion_low
+
+            sl_distance_pct = round(
+                (entry_price - stop_loss)
+                / entry_price
+                * 100,
+                3
+            )
+
+        else:
+
+            # SHORT
+
+            entry_price = confusion_low
+
+            stop_loss = confusion_high
+
+            sl_distance_pct = round(
+                (stop_loss - entry_price)
+                / entry_price
+                * 100,
+                3
+            )
+
+        # ========================================================
+        # INVALID SL
+        # ========================================================
         if sl_distance_pct <= 0:
+
             discarded_count += 1
+
             continue
 
         confirmed_count += 1
-        # ---- NAYA: Order Flow snapshot — SIRF confirmed LONG/SHORT ----
-        # ke liye fetch hota hai. NO_CONFIRMATION setups ke liye yeh
-        # call kabhi nahi hoti — unnecessary API calls avoid karne ke
-        # liye. Failure-safe: koi bhi error V5 flow ko break nahi karti.
+
+        # ========================================================
+        # ORDER FLOW
+        # SIRF CONFIRMED LONG/SHORT KE LIYE
+        # ========================================================
         try:
-            order_flow = get_order_flow_snapshot(pair)
+
+            order_flow = get_order_flow_snapshot(
+                pair
+            )
+
         except Exception as e:
-            print(f"  [sr_shape_tracker] {pair} order flow error: {e}")
+
+            print(
+                f"  [sr_shape_tracker] "
+                f"{pair} order flow error: {e}"
+            )
+
             order_flow = {
-                "Aggressive_Buy_Volume": None, "Aggressive_Sell_Volume": None,
-                "Delta": None, "Delta_Pct": None, "Order_Flow_Sample_Size": 0,
-                "Order_Flow_Span_Seconds": None, "Aggressive_Trade_Count": 0,
+                "Aggressive_Buy_Volume": None,
+                "Aggressive_Sell_Volume": None,
+                "Delta": None,
+                "Delta_Pct": None,
+                "Order_Flow_Sample_Size": 0,
+                "Order_Flow_Span_Seconds": None,
+                "Aggressive_Trade_Count": 0,
                 "Order_Flow_Error": f"unexpected: {e}",
             }
 
-        
+        # ========================================================
+        # V5 LIVE SCANNER KE LIYE SETUP COLLECT KARO
+        # ========================================================
+        confirmed_setups.append(
+            {
+                "pair": pair,
+
+                "candle_time_ist": row["Candle_Time"],
+
+                "next_candle_time_ist": _to_ist_str(
+                    next_candle_time
+                ),
+
+                "break_direction": break_direction,
+
+                "entry_price": entry_price,
+
+                "stop_loss": stop_loss,
+
+                "sl_distance_pct": sl_distance_pct,
+
+                "confusion_high": confusion_high,
+
+                "confusion_low": confusion_low,
+
+                "rvol_20": rvol_20,
+
+                "rvol_96": rvol_96,
+
+                "price_position": row.get(
+                    "Price_Position",
+                    "UNKNOWN"
+                ),
+
+                "sr_level_price": row.get(
+                    "SR_Level_Price",
+                    ""
+                ),
+
+                "sr_touch_count": row.get(
+                    "SR_Touch_Count",
+                    0
+                ),
+
+                "candle_shape": row.get(
+                    "Candle_Shape",
+                    "UNKNOWN"
+                ),
+
+                "shape_strength": row.get(
+                    "Shape_Strength",
+                    ""
+                ),
+
+                "body_pct": row.get(
+                    "Body_Pct",
+                    ""
+                ),
+
+                "market_regime": row.get(
+                    "Market_Regime",
+                    ""
+                ),
+
+                "regime_score": row.get(
+                    "Regime_Score",
+                    ""
+                ),
+
+                "background_regime": row.get(
+                    "Background_Regime",
+                    ""
+                ),
+
+                "background_regime_score": row.get(
+                    "Background_Regime_Score",
+                    ""
+                ),
+
+                "aggressive_buy_volume":
+                    order_flow[
+                        "Aggressive_Buy_Volume"
+                    ],
+
+                "aggressive_sell_volume":
+                    order_flow[
+                        "Aggressive_Sell_Volume"
+                    ],
+
+                "delta":
+                    order_flow[
+                        "Delta"
+                    ],
+
+                "delta_pct":
+                    order_flow[
+                        "Delta_Pct"
+                    ],
+
+                "order_flow_sample_size":
+                    order_flow[
+                        "Order_Flow_Sample_Size"
+                    ],
+
+                "order_flow_span_seconds":
+                    order_flow[
+                        "Order_Flow_Span_Seconds"
+                    ],
+
+                "order_flow_error":
+                    order_flow[
+                        "Order_Flow_Error"
+                    ],
+            }
+        )
+
+        # ========================================================
+        # DRY RUN
+        # ========================================================
         if dry_run:
-            print(f"  [sr_shape_tracker][DRY_RUN] {pair} CONFIRMED {break_direction}: "
-                  f"entry={entry_price} sl={stop_loss} ({sl_distance_pct}%) "
-                  f"next_candle_time={next_candle_time}")
+
+            print(
+                f"  [sr_shape_tracker][DRY_RUN] "
+                f"{pair} CONFIRMED {break_direction}: "
+                f"entry={entry_price} "
+                f"sl={stop_loss} "
+                f"({sl_distance_pct}%) "
+                f"next_candle_time={next_candle_time}"
+            )
+
+        # ========================================================
+        # PRODUCTION -> PENDING SHEET + OPTIONAL TELEGRAM
+        # ========================================================
         else:
+
             pending_ws = _get_pending_worksheet()
-            pending_ws.append_row([
-                pair,
-                _to_ist_str(candle_time),
-                row["Candle_Color"],
-                close,
-                rvol_20 if rvol_20 is not None else "",
-                rvol_96 if rvol_96 is not None else "",
-                row.get("Price_Position", "UNKNOWN"),
-                row.get("SR_Level_Price", ""),
-                row.get("SR_Touch_Count", 0),
-                row.get("Candle_Shape", "UNKNOWN"),
-                row.get("Shape_Strength", ""),
-                row.get("Body_Pct", ""),
-                row.get("Rejection_Side", ""),
-                confusion_high,
-                confusion_low,
-                close,
-                _to_ist_str(next_candle_time),
-                next_high,
-                next_low,
-                break_direction,
-                entry_price,
-                stop_loss,
-                sl_distance_pct,
-                "PENDING",
-                # ---- regime fields (carried forward, v4.5) ----
-                row.get("Market_Regime", ""),
-                row.get("Regime_Score", ""),
-                row.get("Regime_Lookback", ""),
-                row.get("Trend_Direction", ""),
-                # ---- NAYA (v4.6): background regime fields (carried forward) ----
-                row.get("Background_Regime", ""),
-                row.get("Background_Regime_Score", ""),
-                row.get("Background_Regime_Lookback", ""),
-                row.get("Background_Trend_Direction", ""),
-                # ---- NAYA: Order Flow fields ----
-                order_flow["Aggressive_Buy_Volume"] if order_flow["Aggressive_Buy_Volume"] is not None else "",
-                order_flow["Aggressive_Sell_Volume"] if order_flow["Aggressive_Sell_Volume"] is not None else "",
-                order_flow["Delta"] if order_flow["Delta"] is not None else "",
-                order_flow["Delta_Pct"] if order_flow["Delta_Pct"] is not None else "",
-                order_flow["Order_Flow_Sample_Size"],
-                order_flow["Order_Flow_Span_Seconds"] if order_flow["Order_Flow_Span_Seconds"] is not None else "",
-                order_flow["Aggressive_Trade_Count"],
-                order_flow["Order_Flow_Error"],
-            ], table_range="A1")
-            try:
-                confirm_msg = _build_confirmation_message(
-                    pair, candle_time, break_direction, confusion_high, confusion_low,
-                    next_candle_time, next_high, next_low, entry_price, stop_loss,
-                    sl_distance_pct, rvol_20=rvol_20, rvol_96=rvol_96,
-                )
-                send_confusion_telegram_message(confirm_msg)
-            except Exception as e:
-                print(f"  [sr_shape_tracker] Confusion Telegram (confirmation) error: {e}")
 
-        print(f"  [sr_shape_tracker] {pair} breakout CONFIRMED: {break_direction} "
-              f"entry={entry_price} SL={stop_loss} ({sl_distance_pct}% away)")
+            pending_ws.append_row(
+                [
+                    pair,
+                    _to_ist_str(candle_time),
+                    row["Candle_Color"],
+                    close,
 
+                    rvol_20
+                    if rvol_20 is not None
+                    else "",
+
+                    rvol_96
+                    if rvol_96 is not None
+                    else "",
+
+                    row.get(
+                        "Price_Position",
+                        "UNKNOWN"
+                    ),
+
+                    row.get(
+                        "SR_Level_Price",
+                        ""
+                    ),
+
+                    row.get(
+                        "SR_Touch_Count",
+                        0
+                    ),
+
+                    row.get(
+                        "Candle_Shape",
+                        "UNKNOWN"
+                    ),
+
+                    row.get(
+                        "Shape_Strength",
+                        ""
+                    ),
+
+                    row.get(
+                        "Body_Pct",
+                        ""
+                    ),
+
+                    row.get(
+                        "Rejection_Side",
+                        ""
+                    ),
+
+                    confusion_high,
+                    confusion_low,
+                    close,
+
+                    _to_ist_str(
+                        next_candle_time
+                    ),
+
+                    next_high,
+                    next_low,
+
+                    break_direction,
+
+                    entry_price,
+                    stop_loss,
+                    sl_distance_pct,
+
+                    "PENDING",
+
+                    # Recent regime
+                    row.get(
+                        "Market_Regime",
+                        ""
+                    ),
+
+                    row.get(
+                        "Regime_Score",
+                        ""
+                    ),
+
+                    row.get(
+                        "Regime_Lookback",
+                        ""
+                    ),
+
+                    row.get(
+                        "Trend_Direction",
+                        ""
+                    ),
+
+                    # Background regime
+                    row.get(
+                        "Background_Regime",
+                        ""
+                    ),
+
+                    row.get(
+                        "Background_Regime_Score",
+                        ""
+                    ),
+
+                    row.get(
+                        "Background_Regime_Lookback",
+                        ""
+                    ),
+
+                    row.get(
+                        "Background_Trend_Direction",
+                        ""
+                    ),
+
+                    # Order Flow
+                    order_flow[
+                        "Aggressive_Buy_Volume"
+                    ]
+                    if order_flow[
+                        "Aggressive_Buy_Volume"
+                    ] is not None
+                    else "",
+
+                    order_flow[
+                        "Aggressive_Sell_Volume"
+                    ]
+                    if order_flow[
+                        "Aggressive_Sell_Volume"
+                    ] is not None
+                    else "",
+
+                    order_flow[
+                        "Delta"
+                    ]
+                    if order_flow[
+                        "Delta"
+                    ] is not None
+                    else "",
+
+                    order_flow[
+                        "Delta_Pct"
+                    ]
+                    if order_flow[
+                        "Delta_Pct"
+                    ] is not None
+                    else "",
+
+                    order_flow[
+                        "Order_Flow_Sample_Size"
+                    ],
+
+                    order_flow[
+                        "Order_Flow_Span_Seconds"
+                    ]
+                    if order_flow[
+                        "Order_Flow_Span_Seconds"
+                    ] is not None
+                    else "",
+
+                    order_flow[
+                        "Aggressive_Trade_Count"
+                    ],
+
+                    order_flow[
+                        "Order_Flow_Error"
+                    ],
+                ],
+                table_range="A1"
+            )
+
+            # ====================================================
+            # INDIVIDUAL CONFUSION TELEGRAM
+            # V5 scanner mein False kar diya jayega
+            # ====================================================
+            if send_individual_telegram:
+
+                try:
+
+                    confirm_msg = _build_confirmation_message(
+                        pair,
+                        candle_time,
+                        break_direction,
+                        confusion_high,
+                        confusion_low,
+                        next_candle_time,
+                        next_high,
+                        next_low,
+                        entry_price,
+                        stop_loss,
+                        sl_distance_pct,
+                        rvol_20=rvol_20,
+                        rvol_96=rvol_96,
+                    )
+
+                    send_confusion_telegram_message(
+                        confirm_msg
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"  [sr_shape_tracker] "
+                        f"Confusion Telegram "
+                        f"(confirmation) error: {e}"
+                    )
+
+        print(
+            f"  [sr_shape_tracker] "
+            f"{pair} breakout CONFIRMED: "
+            f"{break_direction} "
+            f"entry={entry_price} "
+            f"SL={stop_loss} "
+            f"({sl_distance_pct}% away)"
+        )
+
+    # ============================================================
+    # REWRITE AWAITING SHEET
+    # ============================================================
     if not dry_run:
-        try:
-            clean_rows = [[
-                r["Pair"], r["Candle_Time"],
-                r["Candle_Color"], r["Close"],
-                r.get("RVOL_20", ""),
-                r.get("RVOL_96", ""),
-                r.get("Price_Position", "UNKNOWN"),
-                r.get("SR_Level_Price", ""),
-                r.get("SR_Touch_Count", 0),
-                r.get("Candle_Shape", "UNKNOWN"),
-                r.get("Shape_Strength", ""),
-                r.get("Body_Pct", ""),
-                r.get("Rejection_Side", ""),
-                r.get("Candle_High", ""),
-                r.get("Candle_Low", ""),
-                "AWAITING_CONFIRMATION",
-                # ---- regime fields (preserved on rewrite, v4.5) ----
-                r.get("Market_Regime", ""),
-                r.get("Regime_Score", ""),
-                r.get("Regime_Lookback", ""),
-                r.get("Trend_Direction", ""),
-                # ---- NAYA (v4.6): background regime fields (preserved on rewrite) ----
-                r.get("Background_Regime", ""),
-                r.get("Background_Regime_Score", ""),
-                r.get("Background_Regime_Lookback", ""),
-                r.get("Background_Trend_Direction", ""),
-            ] for r in still_awaiting]
-            awaiting_ws.clear()
-            awaiting_ws.update([AWAITING_HEADER] + clean_rows)
-        except Exception as e:
-            print(f"  [sr_shape_tracker] Awaiting sheet update error: {e}")
-    else:
-        print(f"  [sr_shape_tracker][DRY_RUN] Still awaiting: {len(still_awaiting)}")
 
-    print(f"  [sr_shape_tracker] Confirmations: LONG/SHORT={confirmed_count} | "
-          f"NO_CONFIRMATION(closed)={no_confirmation_count} | "
-          f"Still awaiting (immediately-next candle not yet printed): {len(still_awaiting)} | "
-          f"Discarded (stale/degenerate): {discarded_count}")
+        try:
+
+            clean_rows = [
+                [
+                    r["Pair"],
+                    r["Candle_Time"],
+                    r["Candle_Color"],
+                    r["Close"],
+
+                    r.get(
+                        "RVOL_20",
+                        ""
+                    ),
+
+                    r.get(
+                        "RVOL_96",
+                        ""
+                    ),
+
+                    r.get(
+                        "Price_Position",
+                        "UNKNOWN"
+                    ),
+
+                    r.get(
+                        "SR_Level_Price",
+                        ""
+                    ),
+
+                    r.get(
+                        "SR_Touch_Count",
+                        0
+                    ),
+
+                    r.get(
+                        "Candle_Shape",
+                        "UNKNOWN"
+                    ),
+
+                    r.get(
+                        "Shape_Strength",
+                        ""
+                    ),
+
+                    r.get(
+                        "Body_Pct",
+                        ""
+                    ),
+
+                    r.get(
+                        "Rejection_Side",
+                        ""
+                    ),
+
+                    r.get(
+                        "Candle_High",
+                        ""
+                    ),
+
+                    r.get(
+                        "Candle_Low",
+                        ""
+                    ),
+
+                    "AWAITING_CONFIRMATION",
+
+                    # Recent regime
+                    r.get(
+                        "Market_Regime",
+                        ""
+                    ),
+
+                    r.get(
+                        "Regime_Score",
+                        ""
+                    ),
+
+                    r.get(
+                        "Regime_Lookback",
+                        ""
+                    ),
+
+                    r.get(
+                        "Trend_Direction",
+                        ""
+                    ),
+
+                    # Background regime
+                    r.get(
+                        "Background_Regime",
+                        ""
+                    ),
+
+                    r.get(
+                        "Background_Regime_Score",
+                        ""
+                    ),
+
+                    r.get(
+                        "Background_Regime_Lookback",
+                        ""
+                    ),
+
+                    r.get(
+                        "Background_Trend_Direction",
+                        ""
+                    ),
+                ]
+
+                for r in still_awaiting
+            ]
+
+            awaiting_ws.clear()
+
+            awaiting_ws.update(
+                [AWAITING_HEADER] + clean_rows
+            )
+
+        except Exception as e:
+
+            print(
+                f"  [sr_shape_tracker] "
+                f"Awaiting sheet update error: {e}"
+            )
+
+    else:
+
+        print(
+            f"  [sr_shape_tracker][DRY_RUN] "
+            f"Still awaiting: "
+            f"{len(still_awaiting)}"
+        )
+
+    # ============================================================
+    # SUMMARY
+    # ============================================================
+    print(
+        f"  [sr_shape_tracker] "
+        f"Confirmations: LONG/SHORT={confirmed_count} | "
+        f"NO_CONFIRMATION(closed)={no_confirmation_count} | "
+        f"Still awaiting "
+        f"(immediately-next candle not yet printed): "
+        f"{len(still_awaiting)} | "
+        f"Discarded (stale/degenerate): "
+        f"{discarded_count}"
+    )
+
+    # ============================================================
+    # IMPORTANT:
+    # LIVE V5 SCANNER ISKO USE KAREGA
+    # ============================================================
+    return confirmed_setups
 
 
 # ============================================

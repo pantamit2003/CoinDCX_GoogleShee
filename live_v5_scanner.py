@@ -135,7 +135,7 @@ RESOLUTION_MINUTES = 15
 # based nahi hai, to yeh "random/arbitrary 100" ban jaata hai, "top 100"
 # nahi. exchange/coindcx.py ka get_active_pairs() dikhao, confirm hote
 # hi is comment ko hata denge / sorting add kar denge agar zaroorat ho.
-MAX_PAIRS_LIVE = 100
+MAX_PAIRS_LIVE = 300
 SLEEP_BETWEEN_PAIRS = 0.3
 
 # Dedicated "V5 CONFIRMED" bot ke credentials — env var ya

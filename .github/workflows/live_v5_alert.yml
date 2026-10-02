@@ -42,5 +42,5 @@ jobs:
 
       - name: Run live_v5_scanner.py
         env:
-          DRY_RUN: "False"
+          DRY_RUN: "True"
         run: python live_v5_scanner.py  

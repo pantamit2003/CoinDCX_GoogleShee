@@ -617,7 +617,7 @@ def _rvol_gate_passed(rvol_20, rvol_96):
 # ============================================
 # STAGE 1: CONFUSION candle detect karna + AWAITING_CONFIRMATION mein daalna
 # ============================================
-def process_candle(pair, df, dry_run=False):
+def process_candle(pair, df, dry_run=False, setup_out=None):
     """
     Flowchart Stage 1 implement karta hai ek pair ke liye:
         15-min candle -> valid S/R ke paas? -> shape classify ->
@@ -637,6 +637,10 @@ def process_candle(pair, df, dry_run=False):
 
     df: candle dataframe (kam se kam SR_LOOKBACK+ candles chahiye,
         columns: Time/Open/High/Low/Close/Volume)
+
+    setup_out: optional list. Agar di gayi to qualify hone par is list
+        mein setup ki info (dict) append hoti hai — live_v5_scanner.py
+        ke liye. Detection logic par koi asar nahi.
 
     Return: True agar candle qualify hoke awaiting-confirmation mein
             add hui, False agar skip hui.
@@ -770,6 +774,30 @@ def process_candle(pair, df, dry_run=False):
           f"Regime={regime_result['Market_Regime']} (score={regime_result['Regime_Score']}) | "
           f"Background={background_result['Market_Regime']} (score={background_result['Regime_Score']}) — "
           f"waiting for immediately-next candle.")
+
+    # ---- NAYA: live V5 scanner ke liye setup info (additive, detection unchanged) ----
+    if setup_out is not None:
+        setup_out.append({
+            "pair": pair,
+            "candle_time_ist": _to_ist_str(candle_time),
+            "candle_time_utc": _to_utc_dt(candle_time),
+            "candle_color": candle_color,
+            "close": close,
+            "rvol_20": rvol_20,
+            "rvol_96": rvol_96,
+            "price_position": price_position,
+            "sr_level_price": sr_level_price,
+            "sr_touch_count": sr_touch_count,
+            "candle_shape": shape_ctx["shape"],
+            "shape_strength": shape_ctx["strength"],
+            "body_pct": shape_ctx["body_pct"],
+            "confusion_high": candle_high,
+            "confusion_low": candle_low,
+            "market_regime": regime_result["Market_Regime"],
+            "regime_score": regime_result["Regime_Score"],
+            "background_regime": background_result["Market_Regime"],
+            "background_regime_score": background_result["Regime_Score"],
+        })
 
     # ---- CONFUSION bot ko Telegram alert (awaiting confirmation) ----
     awaiting_msg = _build_awaiting_message(

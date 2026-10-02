@@ -43,4 +43,6 @@ jobs:
       - name: Run live_v5_scanner.py
         env:
           DRY_RUN: "False"
+          LIVE_V5_BOT_TOKEN: ${{ secrets.LIVE_V5_BOT_TOKEN }}
+          LIVE_V5_CHAT_ID: ${{ secrets.LIVE_V5_CHAT_ID }}
         run: python live_v5_scanner.py  

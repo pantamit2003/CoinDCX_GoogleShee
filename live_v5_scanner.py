@@ -2,15 +2,25 @@
 live_v5_scanner.py — single-run live V5 alert (cron-job.org / GitHub Actions).
 
 FLOW (har run mein):
-  Stage 2/3 (sheet tracking, Telegram se independent)
-  -> Stage 1: process_candle (V5 detection, unchanged)
-  -> detect hote hi us pair ka Order Flow snapshot, SAME RUN mein
-  -> deterministic selection (sirf 1 setup)
-  -> LIVE_V5 bot par turant alert.
+  Stage 2/3 (sheet tracking, existing logic, unchanged)
+  -> Stage 1: sr_shape_tracker.process_candle (V5 detection, UNCHANGED)
+        15-min candle -> valid S/R -> CONFUSION -> RVOL gate
+        (RVOL_20 >= RVOL_SHORT_THRESHOLD OR RVOL_96 >= RVOL_LONG_THRESHOLD)
+        -> AWAITING_CONFIRMATION (sheet)
+  -> deterministic selection (sirf 1 setup) — sirf V5 fields se
+  -> LIVE_V5 bot par turant alert (next-candle confirmation ka wait NAHI).
 
-Alert next-candle confirmation ka wait NAHI karta (direction pending hoti hai).
-Order Flow = get_order_flow_snapshot(pair) ka last ~30 trades ka chhota snapshot
-(kuch seconds), 15-min candle ka Delta NAHI — alert mein yahi likha jaata hai.
+Sheet tracking (AWAITING_CONFIRMATION -> confirmation -> PENDING -> outcome)
+sr_shape_outcome_tracker.py ke existing logic se hi chalti rehti hai.
+
+ORDER FLOW (optional, sirf informational):
+  get_order_flow_snapshot(pair) CoinDCX ke last ~30 trades ka chhota
+  snapshot hai (kuch seconds). Yeh 15-min candle ka Delta NAHI hai, V5
+  detection ka hissa nahi hai, volume gate ka replacement nahi hai, aur
+  selection/ranking mein bhi use nahi hota. Alert mein sirf
+  "LAST TRADES SNAPSHOT" ke naam se dikhta hai. Actual 15-min candle Delta
+  existing V1-V6 logic mein defined nahi hai, isliye koi candle Delta
+  calculate/approximate nahi kiya gaya.
 """
 import html
 import json
@@ -91,53 +101,83 @@ def _build_v5_message(s):
     def fmt(v, suffix=""):
         if v is None or v == "":
             return "N/A"
-        return f"{v}{suffix}"
+        return html.escape(f"{v}{suffix}")
 
-    lag = s.get("secs_after_candle_close")
-    lag_txt = f"~{lag:.0f}s" if lag is not None else "N/A"
-    err = s.get("order_flow_error")
-    err_line = f"\n  ⚠️ Order Flow Error: {html.escape(str(err))}" if err else ""
-
-    return (
+    # ---- original V5 (Stage 1) data ----
+    msg = (
         f"🔔 <b>V5 SETUP DETECTED (Confusion Candle)</b> — DIRECTION PENDING\n"
         f"<i>Yeh alert next-candle confirmation ka wait nahi karta. LONG/SHORT abhi "
         f"confirm NAHI hai. Trade instruction nahi — khud verify karo.</i>\n\n"
-        f"<b>Pair:</b> {s['pair']}\n"
-        f"<b>Candle Time (IST):</b> {s['candle_time_ist']}\n"
+        f"<b>Pair:</b> {fmt(s['pair'])}\n"
+        f"<b>Candle Time (IST):</b> {fmt(s['candle_time_ist'])}\n"
         f"<b>Confusion High / Low:</b> {fmt(s['confusion_high'])} / {fmt(s['confusion_low'])}\n"
         f"<b>Conditional:</b> High ke upar break = LONG (SL {fmt(s['confusion_low'])}) | "
         f"Low ke neeche break = SHORT (SL {fmt(s['confusion_high'])})\n\n"
         f"<b>RVOL_20:</b> {fmt(s['rvol_20'], 'x')} | <b>RVOL_96:</b> {fmt(s['rvol_96'], 'x')}\n"
-        f"<b>Price Position:</b> {fmt(s['price_position'])} "
-        f"(Level: {fmt(s['sr_level_price'])}, touched {fmt(s['sr_touch_count'])}x)\n"
+        f"<b>Price Position:</b> {fmt(s['price_position'])}\n"
+        f"<b>S/R Level:</b> {fmt(s['sr_level_price'])} | <b>Touch Count:</b> {fmt(s['sr_touch_count'])}\n"
         f"<b>Candle Shape:</b> {fmt(s['candle_shape'])} "
         f"({fmt(s['shape_strength'])}, body={fmt(s['body_pct'], '%')})\n"
         f"<b>Regime (Recent):</b> {fmt(s['market_regime'])} (score={fmt(s['regime_score'])})\n"
         f"<b>Regime (Background):</b> {fmt(s['background_regime'])} "
-        f"(score={fmt(s['background_regime_score'])})\n\n"
-        f"<b>Order Flow — ⚠️ SHORT SNAPSHOT, 15-min candle ka Delta NAHI</b>\n"
-        f"<i>CoinDCX endpoint sirf last ~30 trades deta hai (kuch seconds). "
-        f"Tick-rule se inferred, exchange-provided nahi. Isse candle ke "
-        f"buying/selling pressure ka proof mat maano.</i>\n"
-        f"  Fetched ≈ {lag_txt} after candle close (candle time = open time maana gaya)\n"
-        f"  Aggressive Buy Vol: {fmt(s.get('aggressive_buy_volume'))}\n"
-        f"  Aggressive Sell Vol: {fmt(s.get('aggressive_sell_volume'))}\n"
-        f"  Snapshot Delta: {fmt(s.get('delta'))} | Snapshot Delta %: {fmt(s.get('delta_pct'), '%')}\n"
-        f"  Sample: {fmt(s.get('order_flow_sample_size'))} trades | "
-        f"Span: {fmt(s.get('order_flow_span_seconds'))}s"
-        f"{err_line}"
+        f"(score={fmt(s['background_regime_score'])})"
+    )
+
+    # ---- optional, clearly-labelled last-trades snapshot (NOT candle Delta) ----
+    if s.get("order_flow_attached"):
+        lag = s.get("secs_after_candle_close")
+        lag_txt = f"~{lag:.0f}s" if lag is not None else "N/A"
+        err = s.get("order_flow_error")
+        err_line = f"\n  ⚠️ Snapshot error: {html.escape(str(err))}" if err else ""
+        msg += (
+            f"\n\n<b>LAST TRADES SNAPSHOT (info only)</b>\n"
+            f"<i>CoinDCX ke sirf last ~30 trades (kuch seconds), tick-rule se inferred. "
+            f"Yeh 15-min candle ka Delta NAHI hai, V5 detection ya RVOL gate ka hissa "
+            f"nahi hai, aur selection mein use nahi hua.</i>\n"
+            f"  Fetched ≈ {lag_txt} after candle close (candle time = open time maana gaya)\n"
+            f"  Buy vol (last trades): {fmt(s.get('aggressive_buy_volume'))}\n"
+            f"  Sell vol (last trades): {fmt(s.get('aggressive_sell_volume'))}\n"
+            f"  Net buy-sell (last trades): {fmt(s.get('delta'))} "
+            f"({fmt(s.get('delta_pct'), '%')})\n"
+            f"  Sample: {fmt(s.get('order_flow_sample_size'))} trades | "
+            f"Span: {fmt(s.get('order_flow_span_seconds'))}s"
+            f"{err_line}"
+        )
+    return msg
+
+
+# ---------------- report-V5 filter (alert-only) ----------------
+def _is_report_v5(setup):
+    """
+    Report V5 (generate_strategy_report_sheet wala):
+        NEAR_SUPPORT + RVOL_20 in [2.0, 3.0) + Body_Pct < 20
+    Tracker ke apne helper functions reuse hote hain taaki live aur
+    report definitions kabhi alag na ho jaayein. Sirf Telegram alert
+    filter karta hai — detection aur sheet tracking par koi asar nahi.
+    """
+    row = {
+        "Price_Position": setup.get("price_position"),
+        "RVOL_20": setup.get("rvol_20") if setup.get("rvol_20") is not None else "",
+        "Body_Pct": setup.get("body_pct") if setup.get("body_pct") is not None else "",
+    }
+    return (
+        sr_shape_tracker._in_rvol_2_3_band(row)
+        and sr_shape_tracker._body_lt_20(row)
+        and sr_shape_tracker._near_support(row)
     )
 
 
-# ---------------- selection (existing deterministic logic) ----------------
+# ---------------- selection (sirf V5 fields, order flow se independent) ----------------
 def _score_setup(s):
     def safe_float(v):
         try:
             return float(v) if v is not None and v != "" else 0.0
         except (TypeError, ValueError):
             return 0.0
-    return (abs(safe_float(s.get("delta_pct"))),
-            safe_float(s.get("rvol_20")),
+    # RVOL_20, RVOL_96, touch count — sab existing V5 fields. Order flow
+    # snapshot ranking mein use NAHI hota.
+    return (safe_float(s.get("rvol_20")),
+            safe_float(s.get("rvol_96")),
             safe_float(s.get("sr_touch_count")))
 
 
@@ -149,8 +189,12 @@ def select_one_setup(setups):
     return tied[0]
 
 
-# ---------------- order flow attach ----------------
+# ---------------- optional last-trades snapshot (informational only) ----------------
 def _attach_order_flow(setup):
+    """
+    Sirf selected setup par, alert se thik pehle. Detection/selection se
+    koi lena-dena nahi. Failure non-fatal hai — alert phir bhi jaata hai.
+    """
     try:
         of = get_order_flow_snapshot(setup["pair"]) or {}
     except Exception as e:
@@ -159,6 +203,7 @@ def _attach_order_flow(setup):
     fetched_at = datetime.now(timezone.utc)
     candle_close = setup["candle_time_utc"] + timedelta(minutes=RESOLUTION_MINUTES)
 
+    setup["order_flow_attached"] = True
     setup["aggressive_buy_volume"] = of.get("Aggressive_Buy_Volume")
     setup["aggressive_sell_volume"] = of.get("Aggressive_Sell_Volume")
     setup["delta"] = of.get("Delta")
@@ -174,11 +219,14 @@ def _attach_order_flow(setup):
 def run_one_live_cycle():
     print(f"\n{'=' * 60}")
     print(f"LIVE V5 CYCLE: {datetime.now(timezone.utc).isoformat()} UTC | DRY_RUN={DRY_RUN}")
+    if DRY_RUN:
+        print("  *** DRY_RUN=ON — Telegram alerts NAHI jaayenge, sheet writes skip ***")
     print('=' * 60)
 
-    # Stage 2 + 3: sirf sheet tracking. Return value ignore — alert inpe dependent nahi.
-    # Stage 1 se PEHLE taaki purane AWAITING rows ka cooldown naye setup ko block na kare.
-    print("  Stage 2: resolve_confirmations (tracking only, no alert)...")
+    # Stage 2 + 3: existing sheet tracking, unchanged. Return value ignore —
+    # Telegram alert inpe dependent nahi. Stage 1 se PEHLE taaki purane
+    # AWAITING rows ka cooldown naye setup ko block na kare.
+    print("  Stage 2: resolve_confirmations (sheet tracking, no individual alert)...")
     try:
         sr_shape_tracker.resolve_confirmations(dry_run=DRY_RUN, send_individual_telegram=False)
     except Exception as e:
@@ -190,16 +238,18 @@ def run_one_live_cycle():
         sr_shape_tracker.resolve_pending(dry_run=DRY_RUN)
     except Exception as e:
         print(f"  [live_v5_scanner] resolve_pending error: {e}")
+        traceback.print_exc()
 
     try:
         pairs = get_active_pairs()
     except Exception as e:
         print(f"  [live_v5_scanner] get_active_pairs() error, cycle SKIP: {e}")
         return
+    total_pairs = len(pairs)
     if MAX_PAIRS_LIVE:
         pairs = pairs[:MAX_PAIRS_LIVE]
 
-    print(f"  Stage 1: scanning {len(pairs)} pairs...")
+    print(f"  Stage 1: scanning {len(pairs)} of {total_pairs} pairs...")
     detected = []
     for pair in pairs:
         try:
@@ -207,10 +257,10 @@ def run_one_live_cycle():
             if df is None or df.empty:
                 continue
             out = []
+            # V5 detection — sr_shape_tracker.process_candle, UNCHANGED.
             qualified = sr_shape_tracker.process_candle(pair, df, dry_run=DRY_RUN, setup_out=out)
             if qualified and out:
-                # Order Flow detection ke turant baad (scan ke end mein nahi) — lag kam
-                detected.append(_attach_order_flow(out[0]))
+                detected.append(out[0])
         except Exception as e:
             print(f"  [live_v5_scanner] {pair} error (skip, continue): {e}")
         time.sleep(SLEEP_BETWEEN_PAIRS)
@@ -219,14 +269,29 @@ def run_one_live_cycle():
         print("  No V5 setup detected this cycle — no alert.")
         return
 
-    print(f"  {len(detected)} setup(s) detected: {[s['pair'] for s in detected]}")
-    selected = select_one_setup(detected)
+    print(f"  {len(detected)} Stage-1 setup(s) detected (sheet mein track ho rahe hain): "
+          f"{[s['pair'] for s in detected]}")
+
+    # Alert sirf report-V5 match par. Baaki setups sheet mein pehle se
+    # AWAITING_CONFIRMATION mein hain aur tracking normal chalegi.
+    v5_matches = [s for s in detected if _is_report_v5(s)]
+    skipped = [s['pair'] for s in detected if not _is_report_v5(s)]
+    if skipped:
+        print(f"  Report-V5 filter se skip (alert nahi, tracking jaari): {skipped}")
+    if not v5_matches:
+        print("  Koi setup report-V5 (NEAR_SUPPORT + RVOL_20 2-3 + body<20%) match nahi — no alert.")
+        return
+    print(f"  {len(v5_matches)} report-V5 setup(s): {[s['pair'] for s in v5_matches]}")
+    selected = select_one_setup(v5_matches)
 
     state = _load_state()
     key = f"{selected['pair']}|{selected['candle_time_ist']}"
     if key in state["alerted_keys"]:
         print(f"  Already alerted for {key} — skip duplicate.")
         return
+
+    # Optional info-only snapshot, sirf selected setup ke liye.
+    selected = _attach_order_flow(selected)
 
     message = _build_v5_message(selected)
     if DRY_RUN:

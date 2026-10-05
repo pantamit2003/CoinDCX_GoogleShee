@@ -485,7 +485,11 @@ def _process_pair(pair, dry_run=False):
             setup_out=setup_out,
         )
 
-        if not qualified or not setup_out:
+        # IMPORTANT:
+        # process_candle() may return False because the original
+        # tracker is waiting for the next candle confirmation.
+        # For this LIVE V1-V6 scanner, setup_out itself is enough.
+        if not setup_out:
             return []
 
         setup = setup_out[0]
@@ -615,7 +619,12 @@ def run_one_cycle():
                 )
             )
 
-            if not qualified or not setup_out:
+            # IMPORTANT:
+            # Do NOT wait for process_candle() to return True.
+            # The original tracker can return False while waiting
+            # for the next candle, even though setup_out already
+            # contains the current qualifying setup.
+            if not setup_out:
                 continue
 
             setup = setup_out[0]

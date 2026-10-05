@@ -33,6 +33,64 @@ jobs:
           ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           EOF
 
+      - name: Create telegram_config.py
+        run: |
+          cat > telegram_config.py << 'EOF'
+          TELEGRAM_BOT_TOKEN = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          TELEGRAM_CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
+
+          TELEGRAM_STRONG_BOT_TOKEN = "${{ secrets.TELEGRAM_STRONG_BOT_TOKEN }}"
+          TELEGRAM_STRONG_CHAT_ID = "${{ secrets.TELEGRAM_STRONG_CHAT_ID }}"
+
+          CONFUSION_BOT_TOKEN = "${{ secrets.CONFUSION_BOT_TOKEN }}"
+          CONFUSION_CHAT_ID = "${{ secrets.CONFUSION_CHAT_ID }}"
+
+          LIVE_V5_BOT_TOKEN = "${{ secrets.LIVE_V5_BOT_TOKEN }}"
+          LIVE_V5_CHAT_ID = "${{ secrets.LIVE_V5_CHAT_ID }}"
+
+          V1_V3_BOT_TOKEN = "${{ secrets.V1_V3_BOT_TOKEN }}"
+          V1_V3_CHAT_ID = "${{ secrets.V1_V3_CHAT_ID }}"
+
+          V4_V6_BOT_TOKEN = "${{ secrets.V4_V6_BOT_TOKEN }}"
+          V4_V6_CHAT_ID = "${{ secrets.V4_V6_CHAT_ID }}"
+          EOF
+
+      - name: Check Telegram Config
+        run: |
+          python - <<'PY'
+          import telegram_config
+
+          required = [
+              "TELEGRAM_BOT_TOKEN",
+              "TELEGRAM_CHAT_ID",
+              "TELEGRAM_STRONG_BOT_TOKEN",
+              "TELEGRAM_STRONG_CHAT_ID",
+              "CONFUSION_BOT_TOKEN",
+              "CONFUSION_CHAT_ID",
+              "LIVE_V5_BOT_TOKEN",
+              "LIVE_V5_CHAT_ID",
+              "V1_V3_BOT_TOKEN",
+              "V1_V3_CHAT_ID",
+              "V4_V6_BOT_TOKEN",
+              "V4_V6_CHAT_ID",
+          ]
+
+          print("Checking Telegram configuration...")
+
+          for name in required:
+              value = getattr(telegram_config, name, None)
+
+              if value:
+                  print(f"{name}: OK")
+              else:
+                  print(f"{name}: MISSING")
+                  raise SystemExit(
+                      f"Missing required Telegram config: {name}"
+                  )
+
+          print("All Telegram configuration variables are available.")
+          PY
+
       - name: Run Live V1-V6 Scanner
         env:
           DRY_RUN: "False"

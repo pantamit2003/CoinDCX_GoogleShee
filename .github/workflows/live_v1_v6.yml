@@ -1,4 +1,4 @@
-```yaml
+
 name: Live V1-V6 Alert Scan
 
 on:
@@ -176,4 +176,4 @@ jobs:
 
         run: |
           python live_v1_v6_scanner.py
-```
+

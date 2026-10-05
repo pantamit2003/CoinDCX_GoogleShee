@@ -218,14 +218,28 @@ def _setup_to_report_row(setup):
     }
 
 
+def _body_upto_35(row):
+    """
+    Body percentage <= 35% allowed.
+    35% exactly bhi qualify karega.
+    """
+
+    try:
+        return float(row.get("Body_Pct", "")) <= 35
+
+    except (TypeError, ValueError):
+        return False
+
+
 def _get_matching_strategies(setup):
     """
-    Uses the EXACT existing report helper functions.
+    Uses the existing V1-V6 strategy conditions.
 
-    No new thresholds.
-    No new S/R rules.
-    No new body rule.
-    No new volume rule.
+    ONLY body percentage threshold is changed:
+        previous: < 20%
+        now:      <= 35%
+
+    No S/R, RVOL, touch-count, or other logic is changed.
     """
 
     row = _setup_to_report_row(setup)
@@ -237,14 +251,14 @@ def _get_matching_strategies(setup):
     if (
         sr_shape_tracker._in_rvol_2_3_band(row)
         and sr_shape_tracker._touch_2_3(row)
-        and sr_shape_tracker._body_lt_20(row)
+        and _body_upto_35(row)
         and sr_shape_tracker._near_resistance(row)
     ):
         matched.append("V1")
 
     if (
         sr_shape_tracker._in_rvol_2_3_band(row)
-        and sr_shape_tracker._body_lt_20(row)
+        and _body_upto_35(row)
         and sr_shape_tracker._near_resistance(row)
     ):
         matched.append("V2")
@@ -261,14 +275,14 @@ def _get_matching_strategies(setup):
     if (
         sr_shape_tracker._in_rvol_2_3_band(row)
         and sr_shape_tracker._touch_2_3(row)
-        and sr_shape_tracker._body_lt_20(row)
+        and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V4")
 
     if (
         sr_shape_tracker._in_rvol_2_3_band(row)
-        and sr_shape_tracker._body_lt_20(row)
+        and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V5")
@@ -276,6 +290,7 @@ def _get_matching_strategies(setup):
     if (
         sr_shape_tracker._in_rvol_2_3_band(row)
         and sr_shape_tracker._touch_2_3(row)
+        and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V6")

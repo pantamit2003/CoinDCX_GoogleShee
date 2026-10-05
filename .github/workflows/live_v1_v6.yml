@@ -1,3 +1,4 @@
+```yaml
 name: Live V1-V6 Alert Scan
 
 on:
@@ -14,47 +15,108 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ==========================================================
+      # CHECKOUT
+      # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
+      # ==========================================================
+      # PYTHON
+      # ==========================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+
+      # ==========================================================
+      # DEPENDENCIES
+      # ==========================================================
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+
+      # ==========================================================
+      # GOOGLE CREDENTIALS
+      # ==========================================================
       - name: Create credentials.json
-        run: |
-          cat > credentials.json << 'EOF'
-          ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-          EOF
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
 
+        run: |
+          printf '%s' "$GOOGLE_CREDENTIALS_JSON" > credentials.json
+
+
+      # ==========================================================
+      # TELEGRAM CONFIG
+      #
+      # IMPORTANT:
+      # Secrets ko directly Python code ke andar inject nahi kar rahe.
+      # Pehle environment variables mein la rahe hain.
+      # Phir Python repr() se valid telegram_config.py bana rahe hain.
+      #
+      # Isse SyntaxError nahi aayega.
+      # ==========================================================
       - name: Create telegram_config.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          TELEGRAM_STRONG_BOT_TOKEN: ${{ secrets.TELEGRAM_STRONG_BOT_TOKEN }}
+          TELEGRAM_STRONG_CHAT_ID: ${{ secrets.TELEGRAM_STRONG_CHAT_ID }}
+
+          CONFUSION_BOT_TOKEN: ${{ secrets.CONFUSION_BOT_TOKEN }}
+          CONFUSION_CHAT_ID: ${{ secrets.CONFUSION_CHAT_ID }}
+
+          LIVE_V5_BOT_TOKEN: ${{ secrets.LIVE_V5_BOT_TOKEN }}
+          LIVE_V5_CHAT_ID: ${{ secrets.LIVE_V5_CHAT_ID }}
+
+          V1_V3_BOT_TOKEN: ${{ secrets.V1_V3_BOT_TOKEN }}
+          V1_V3_CHAT_ID: ${{ secrets.V1_V3_CHAT_ID }}
+
+          V4_V6_BOT_TOKEN: ${{ secrets.V4_V6_BOT_TOKEN }}
+          V4_V6_CHAT_ID: ${{ secrets.V4_V6_CHAT_ID }}
+
         run: |
-          cat > telegram_config.py << 'EOF'
-          TELEGRAM_BOT_TOKEN = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          TELEGRAM_CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
+          python - <<'PY'
+          import os
 
-          TELEGRAM_STRONG_BOT_TOKEN = "${{ secrets.TELEGRAM_STRONG_BOT_TOKEN }}"
-          TELEGRAM_STRONG_CHAT_ID = "${{ secrets.TELEGRAM_STRONG_CHAT_ID }}"
+          values = {
+              "TELEGRAM_BOT_TOKEN": os.environ["TELEGRAM_BOT_TOKEN"],
+              "TELEGRAM_CHAT_ID": os.environ["TELEGRAM_CHAT_ID"],
 
-          CONFUSION_BOT_TOKEN = "${{ secrets.CONFUSION_BOT_TOKEN }}"
-          CONFUSION_CHAT_ID = "${{ secrets.CONFUSION_CHAT_ID }}"
+              "TELEGRAM_STRONG_BOT_TOKEN": os.environ["TELEGRAM_STRONG_BOT_TOKEN"],
+              "TELEGRAM_STRONG_CHAT_ID": os.environ["TELEGRAM_STRONG_CHAT_ID"],
 
-          LIVE_V5_BOT_TOKEN = "${{ secrets.LIVE_V5_BOT_TOKEN }}"
-          LIVE_V5_CHAT_ID = "${{ secrets.LIVE_V5_CHAT_ID }}"
+              "CONFUSION_BOT_TOKEN": os.environ["CONFUSION_BOT_TOKEN"],
+              "CONFUSION_CHAT_ID": os.environ["CONFUSION_CHAT_ID"],
 
-          V1_V3_BOT_TOKEN = "${{ secrets.V1_V3_BOT_TOKEN }}"
-          V1_V3_CHAT_ID = "${{ secrets.V1_V3_CHAT_ID }}"
+              "LIVE_V5_BOT_TOKEN": os.environ["LIVE_V5_BOT_TOKEN"],
+              "LIVE_V5_CHAT_ID": os.environ["LIVE_V5_CHAT_ID"],
 
-          V4_V6_BOT_TOKEN = "${{ secrets.V4_V6_BOT_TOKEN }}"
-          V4_V6_CHAT_ID = "${{ secrets.V4_V6_CHAT_ID }}"
-          EOF
+              "V1_V3_BOT_TOKEN": os.environ["V1_V3_BOT_TOKEN"],
+              "V1_V3_CHAT_ID": os.environ["V1_V3_CHAT_ID"],
 
+              "V4_V6_BOT_TOKEN": os.environ["V4_V6_BOT_TOKEN"],
+              "V4_V6_CHAT_ID": os.environ["V4_V6_CHAT_ID"],
+          }
+
+          with open("telegram_config.py", "w", encoding="utf-8") as f:
+              for key, value in values.items():
+                  f.write(f"{key} = {value!r}\n")
+
+          print("telegram_config.py created successfully")
+          PY
+
+
+      # ==========================================================
+      # CONFIG TEST
+      # ==========================================================
       - name: Check Telegram Config
         run: |
           python - <<'PY'
@@ -63,34 +125,45 @@ jobs:
           required = [
               "TELEGRAM_BOT_TOKEN",
               "TELEGRAM_CHAT_ID",
+
               "TELEGRAM_STRONG_BOT_TOKEN",
               "TELEGRAM_STRONG_CHAT_ID",
+
               "CONFUSION_BOT_TOKEN",
               "CONFUSION_CHAT_ID",
+
               "LIVE_V5_BOT_TOKEN",
               "LIVE_V5_CHAT_ID",
+
               "V1_V3_BOT_TOKEN",
               "V1_V3_CHAT_ID",
+
               "V4_V6_BOT_TOKEN",
               "V4_V6_CHAT_ID",
           ]
 
-          print("Checking Telegram configuration...")
+          missing = []
 
           for name in required:
               value = getattr(telegram_config, name, None)
 
-              if value:
-                  print(f"{name}: OK")
-              else:
-                  print(f"{name}: MISSING")
-                  raise SystemExit(
-                      f"Missing required Telegram config: {name}"
-                  )
+              if not value:
+                  missing.append(name)
 
-          print("All Telegram configuration variables are available.")
+          if missing:
+              raise RuntimeError(
+                  "Missing Telegram configuration: "
+                  + ", ".join(missing)
+              )
+
+          print("Telegram config syntax OK")
+          print("All required Telegram variables are present")
           PY
 
+
+      # ==========================================================
+      # RUN LIVE V1-V6 SCANNER
+      # ==========================================================
       - name: Run Live V1-V6 Scanner
         env:
           DRY_RUN: "False"
@@ -103,3 +176,4 @@ jobs:
 
         run: |
           python live_v1_v6_scanner.py
+```

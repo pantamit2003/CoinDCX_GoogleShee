@@ -2450,7 +2450,16 @@ def _body_lt_20(row):
 
 
 def _near_resistance(row):
-    return row.get("Price_Position") == "NEAR_RESISTANCE"
+    return row.get("Price_Position") in (
+        "NEAR_RESISTANCE",
+        "BREAKOUT_ABOVE_RESISTANCE",
+    )
+
+def _near_support(row):
+    return row.get("Price_Position") in (
+        "NEAR_SUPPORT",
+        "BREAKDOWN_BELOW_SUPPORT",
+    )
 
 
 def _near_support(row):

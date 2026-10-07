@@ -2423,7 +2423,15 @@ def _in_rvol_2_3_band(row):
     try:
         return rvol_20 != "" and 2.0 <= float(rvol_20) < 3.0
     except (TypeError, ValueError):
+        return False 
+
+def _in_rvol_2_4_band(row):
+    try:
+        v = float(row.get("RVOL_20", ""))
+    except (TypeError, ValueError):
         return False
+
+    return 2.0 <= v < 4.0
 
 
 def _touch_2_3(row):

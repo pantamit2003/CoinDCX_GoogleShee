@@ -249,7 +249,7 @@ def _get_matching_strategies(setup):
     # ---------------- RESISTANCE ----------------
 
     if (
-        sr_shape_tracker._in_rvol_2_3_band(row)
+        sr_shape_tracker._in_rvol_2_4_band(row)
         and sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_resistance(row)
@@ -257,14 +257,14 @@ def _get_matching_strategies(setup):
         matched.append("V1")
 
     if (
-        sr_shape_tracker._in_rvol_2_3_band(row)
+        sr_shape_tracker._in_rvol_2_4_band(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_resistance(row)
     ):
         matched.append("V2")
 
     if (
-        sr_shape_tracker._in_rvol_2_3_band(row)
+        sr_shape_tracker._in_rvol_2_4_band(row)
         and sr_shape_tracker._touch_2_3(row)
         and sr_shape_tracker._near_resistance(row)
     ):
@@ -273,7 +273,7 @@ def _get_matching_strategies(setup):
     # ---------------- SUPPORT ----------------
 
     if (
-        sr_shape_tracker._in_rvol_2_3_band(row)
+        sr_shape_tracker._in_rvol_2_4_band(row)
         and sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
@@ -281,14 +281,14 @@ def _get_matching_strategies(setup):
         matched.append("V4")
 
     if (
-        sr_shape_tracker._in_rvol_2_3_band(row)
+        sr_shape_tracker._in_rvol_2_4_band(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V5")
 
     if (
-        sr_shape_tracker._in_rvol_2_3_band(row)
+        sr_shape_tracker._in_rvol_2_4_band(row)
         and sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)

@@ -63,7 +63,7 @@ DRY_RUN = (
 
 RESOLUTION = "15"
 
-MAX_PAIRS_LIVE = 300
+MAX_PAIRS_LIVE = 400
 
 # Moderate concurrency.
 # Increase only if CoinDCX API remains stable.

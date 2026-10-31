@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from data.candles import get_candles
+from data.candles_2h import get_candles_2h
 from data.order_flow import get_order_flow_snapshot
 from exchange.coindcx import get_active_pairs
 import sr_shape_outcome_tracker_2h as sr_shape_tracker
@@ -481,10 +481,9 @@ def _fetch_pair(pair):
 
 def _process_pair(pair, dry_run=False):
     try:
-        df = get_candles(
+        get_candles_2h(
             pair=pair,
-            resolution=RESOLUTION,
-            days=2,
+            days=10,
         )
 
         if df is None or df.empty:

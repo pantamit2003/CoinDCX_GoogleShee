@@ -1,107 +1,123 @@
-import requests
-import pandas as pd
 import time
 from datetime import datetime, timezone
 
+import pandas as pd
+import requests
 
-class CandleData:
 
-    BASE_URL = "https://public.coindcx.com/market_data/candlesticks"
+BASE_URL = "https://public.coindcx.com/market_data/candlesticks"
 
-    def get_candles(
-            self,
-            pair="B-BTC_USDT",
-            resolution="1",
-            days=2
-    ):
 
-        # CoinDCX expects Unix timestamp in seconds
-        to_time = int(time.time())
-        from_time = to_time - (days * 24 * 60 * 60)
+def get_candles_2h(pair="B-BTC_USDT", days=10):
+    """
+    Fetch CoinDCX futures 1-hour candles and aggregate them into
+    complete, UTC-aligned 2-hour candles.
 
-        params = {
-            "pair": pair,
-            "from": from_time,
-            "to": to_time,
-            "resolution": resolution,
-            "pcode": "f"
-        }
+    Returns columns: Time, Open, High, Low, Close, Volume
+    """
+    now_seconds = int(time.time())
+    from_seconds = now_seconds - (days * 24 * 60 * 60)
 
-        response = requests.get(self.BASE_URL, params=params)
+    params = {
+        "pair": pair,
+        "from": from_seconds,
+        "to": now_seconds,
+        "resolution": "60",
+        "pcode": "f",
+    }
 
-        if response.status_code != 200:
-            raise Exception(
-                f"API Error {response.status_code}\n{response.text}"
-            )
+    response = requests.get(BASE_URL, params=params, timeout=20)
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"CoinDCX 1h candle API Error {response.status_code}: "
+            f"{response.text[:500]}"
+        )
 
-        data = response.json()
+    payload = response.json()
+    if payload.get("s") != "ok":
+        raise RuntimeError(
+            f"CoinDCX returned unexpected candle response: "
+            f"{str(payload)[:500]}"
+        )
 
-        if data["s"] != "ok":
-            raise Exception("No candle data received.")
+    data = payload.get("data", [])
+    if not data:
+        return pd.DataFrame(
+            columns=["Time", "Open", "High", "Low", "Close", "Volume"]
+        )
 
-        df = pd.DataFrame(data["data"])
-
-        df.rename(columns={
+    df = pd.DataFrame(data).rename(
+        columns={
             "time": "Time",
             "open": "Open",
             "high": "High",
             "low": "Low",
             "close": "Close",
-            "volume": "Volume"
-        }, inplace=True)
+            "volume": "Volume",
+        }
+    )
 
-        df["Time"] = pd.to_datetime(df["Time"], unit="ms")
+    required = ["Time", "Open", "High", "Low", "Close", "Volume"]
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        raise RuntimeError(f"Candle response missing columns: {missing}")
 
-        numeric_columns = [
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
+    # CoinDCX returns candle open time in milliseconds.
+    df["Time"] = pd.to_datetime(df["Time"], unit="ms", utc=True)
+    for column in ["Open", "High", "Low", "Close", "Volume"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    df = (
+        df.dropna(subset=required)
+        .sort_values("Time")
+        .drop_duplicates(subset=["Time"], keep="last")
+        .reset_index(drop=True)
+    )
+
+    if df.empty:
+        return pd.DataFrame(columns=required)
+
+    # Remove a currently forming hourly candle.
+    now_utc = pd.Timestamp.now(tz="UTC")
+    last_hour_open = df["Time"].iloc[-1]
+    if last_hour_open + pd.Timedelta(hours=1) > now_utc:
+        df = df.iloc[:-1].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=required)
+
+    # Align groups to UTC 00:00, 02:00, 04:00, etc.
+    df["_group"] = df["Time"].dt.floor("2h")
+
+    rows = []
+    for group_time, group in df.groupby("_group", sort=True):
+        group = group.sort_values("Time")
+
+        # Keep only complete pairs of hourly candles exactly at
+        # group_time and group_time + 1 hour.
+        expected_times = [
+            group_time,
+            group_time + pd.Timedelta(hours=1),
         ]
+        if len(group) != 2 or list(group["Time"]) != expected_times:
+            continue
 
-        for col in numeric_columns:
-            df[col] = pd.to_numeric(df[col])
+        # Exclude any 2-hour candle that has not fully closed yet.
+        if group_time + pd.Timedelta(hours=2) > now_utc:
+            continue
 
-        df = df.sort_values("Time").reset_index(drop=True)
+        rows.append(
+            {
+                "Time": group_time.tz_localize(None),
+                "Open": float(group["Open"].iloc[0]),
+                "High": float(group["High"].max()),
+                "Low": float(group["Low"].min()),
+                "Close": float(group["Close"].iloc[-1]),
+                "Volume": float(group["Volume"].sum()),
+            }
+        )
 
-        # ---- AGAR daily candle hai aur last candle AAJ (UTC) ki hai,
-        # matlab abhi bann rahi hai (incomplete) — usko hata do. Sirf
-        # poori ban chuki (closed) candle hi "current" data maana
-        # jayega, taaki RVOL/High/Close sab sahi (complete) candle pe
-        # calculate hon. ----
-        if resolution.upper() in ("1D", "D") and not df.empty:
-            last_candle_date = df["Time"].iloc[-1].date()
-            today_utc = datetime.now(timezone.utc).date()
-            if last_candle_date == today_utc:
-                df = df.iloc[:-1].reset_index(drop=True)
-
-        # ---- INTRADAY resolutions (15, 5, 60, etc.) ke liye bhi wahi
-        # cheez — pehle yeh check sirf daily ke liye tha, isliye 15-min
-        # jaisi resolutions mein last row abhi-abhi ban rahi (incomplete)
-        # candle ho sakti thi. Ab yahan bhi: last candle ka expected
-        # close-time (Time + resolution minutes) nikalo, agar abhi tak
-        # woh time nahi aaya, matlab candle abhi live/forming hai -> hata
-        # do. Isse .iloc[-1] hamesha ek guaranteed CLOSED candle hoga,
-        # chahe koi bhi resolution use ho rahi ho. ----
-        elif not df.empty:
-            try:
-                resolution_minutes = int(resolution)
-            except ValueError:
-                resolution_minutes = None  # koi anjaan resolution string, skip
-
-            if resolution_minutes:
-                last_candle_time = df["Time"].iloc[-1]
-                if last_candle_time.tzinfo is None:
-                    last_candle_time = last_candle_time.tz_localize("UTC")
-                expected_close = last_candle_time + pd.Timedelta(minutes=resolution_minutes)
-                now_utc = datetime.now(timezone.utc)
-                if now_utc < expected_close:
-                    df = df.iloc[:-1].reset_index(drop=True)
-
-        return df
-
-
-# ---------- Helper Function ----------
-def get_candles(pair="B-BTC_USDT", resolution="1", days=2):
-    return CandleData().get_candles(pair, resolution, days)
+    return pd.DataFrame(
+        rows,
+        columns=["Time", "Open", "High", "Low", "Close", "Volume"],
+    ).reset_index(drop=True)

@@ -175,7 +175,12 @@ from data.candles import get_candles
 from support_resistance import get_support_resistance, classify_price_position
 from candle_shape import classify_candle_shape
 from data.order_flow import get_order_flow_snapshot
-from notifications.telegram_bot import send_confusion_telegram_message  # teesra, alag bot
+try:
+    from notifications.telegram_bot import send_confusion_telegram_message
+except (ImportError, ModuleNotFoundError):
+    def send_confusion_telegram_message(text: str) -> bool:
+        print("Telegram unavailable; skipping confusion notification.")
+        return False
 import market_regime   # RVOL-independent, no-lookahead regime label (recent + background)
 import config
 

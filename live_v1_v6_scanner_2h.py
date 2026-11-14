@@ -608,6 +608,7 @@ def run_one_cycle():
                     df,
                     dry_run=DRY_RUN,
                     setup_out=setup_out,
+                    record_to_sheets=False,
                 )
 
             # IMPORTANT:

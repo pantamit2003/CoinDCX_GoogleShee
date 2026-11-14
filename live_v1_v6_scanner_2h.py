@@ -233,19 +233,15 @@ def _body_upto_35(row):
 
 def _get_matching_strategies(setup):
     """
-    Uses the existing V1-V6 strategy conditions.
-
-    RVOL is recorded for analysis only; it is never a qualification gate.
-    Body <=35% applies to V1, V2, V4 and V5. V3 and V6 intentionally
-    retain their no-body-filter definitions.
+    Uses the V1-V6 strategy definitions.
+    RVOL is recorded for analysis only and is never a qualification gate.
+    Body <=35% applies only to V1, V2, V4 and V5.
+    V3 and V6 intentionally have no body filter.
     """
-
     row = _setup_to_report_row(setup)
-
     matched = []
 
     # ---------------- RESISTANCE ----------------
-
     if (
         sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
@@ -254,35 +250,33 @@ def _get_matching_strategies(setup):
         matched.append("V1")
 
     if (
-_body_upto_35(row)
+        _body_upto_35(row)
         and sr_shape_tracker._near_resistance(row)
     ):
         matched.append("V2")
 
     if (
-sr_shape_tracker._touch_2_3(row)
+        sr_shape_tracker._touch_2_3(row)
         and sr_shape_tracker._near_resistance(row)
     ):
         matched.append("V3")
 
     # ---------------- SUPPORT ----------------
-
     if (
-sr_shape_tracker._touch_2_3(row)
+        sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V4")
 
     if (
-_body_upto_35(row)
+        _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V5")
 
     if (
-sr_shape_tracker._touch_2_3(row)
-        and _body_upto_35(row)
+        sr_shape_tracker._touch_2_3(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V6")

@@ -620,7 +620,7 @@ def _rvol_gate_passed(rvol_20, rvol_96):
 def process_candle(pair, df, dry_run=False, setup_out=None):
     """
     Flowchart Stage 1 implement karta hai ek pair ke liye:
-        15-min candle -> valid S/R ke paas? -> shape classify ->
+        2H candle -> valid S/R ke paas? -> shape classify ->
         SIRF CONFUSION -> RVOL calculate/record -> High/Low record karke
         AWAITING_CONFIRMATION mein daal do.
 
@@ -2202,7 +2202,7 @@ def resolve_pending(dry_run=False):
             row.get("SL_Distance_Pct", ""),
         ]
 
-        # ---- 15/30/45/60/90/120 min Price/PctChg tracking (anchor se) — UNCHANGED ----
+        # ---- 120/240/360/480/720/960 min Price/PctChg tracking (anchor se) — UNCHANGED ----
         prices_after = []
         pct_changes = []
         all_found = True
@@ -2485,7 +2485,7 @@ def generate_backtest_summary(v_filters=True):
         return
 
     v1_rows = [r for r in resolved if _touch_2_3(r) and _body_upto_35(r) and _near_resistance(r)]
-    v2_rows = [r for r in resolved if _body_lt_20(r) and _near_resistance(r)]
+    v2_rows = [r for r in resolved if _body_upto_35(r) and _near_resistance(r)]
     v3_rows = [r for r in resolved if _touch_2_3(r) and _near_resistance(r)]
 
     print("\n" + "=" * 60)
@@ -2495,8 +2495,8 @@ def generate_backtest_summary(v_filters=True):
     _print_stats_block(v2_rows, "V2: + Body <20% (no touch filter)")
     _print_stats_block(v3_rows, "V3: + Touch 2-3 (no body filter)")
 
-    v4_rows = [r for r in resolved if _touch_2_3(r) and _body_lt_20(r) and _near_support(r)]
-    v5_rows = [r for r in resolved if _body_lt_20(r) and _near_support(r)]
+    v4_rows = [r for r in resolved if _touch_2_3(r) and _body_upto_35(r) and _near_support(r)]
+    v5_rows = [r for r in resolved if _body_upto_35(r) and _near_support(r)]
     v6_rows = [r for r in resolved if _touch_2_3(r) and _near_support(r)]
 
     print("\n" + "=" * 60)
@@ -2653,11 +2653,11 @@ def generate_strategy_report_sheet(include_raw_rows=True, dry_run=False):
     records = results_ws.get_all_records()
     resolved = [r for r in records if r.get("Outcome_1R") in ("WIN_1R", "LOSS_SL", "TIMEOUT", "AMBIGUOUS")]
 
-    v1_rows = [r for r in resolved if _touch_2_3(r) and _body_lt_20(r) and _near_resistance(r)]
-    v2_rows = [r for r in resolved if _body_lt_20(r) and _near_resistance(r)]
+    v1_rows = [r for r in resolved if _touch_2_3(r) and _body_upto_35(r) and _near_resistance(r)]
+    v2_rows = [r for r in resolved if _body_upto_35(r) and _near_resistance(r)]
     v3_rows = [r for r in resolved if _touch_2_3(r) and _near_resistance(r)]
-    v4_rows = [r for r in resolved if _touch_2_3(r) and _body_lt_20(r) and _near_support(r)]
-    v5_rows = [r for r in resolved if _body_lt_20(r) and _near_support(r)]
+    v4_rows = [r for r in resolved if _touch_2_3(r) and _body_upto_35(r) and _near_support(r)]
+    v5_rows = [r for r in resolved if _body_upto_35(r) and _near_support(r)]
     v6_rows = [r for r in resolved if _touch_2_3(r) and _near_support(r)]
 
     v1_stats = _print_stats_block(v1_rows, "V1: + Touch 2-3 + Body <20% (NEAR_RESISTANCE)")

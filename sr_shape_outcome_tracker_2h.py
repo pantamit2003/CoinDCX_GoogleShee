@@ -175,7 +175,15 @@ from data.candles_2h import get_candles_2h
 from support_resistance import get_support_resistance, classify_price_position
 from candle_shape import classify_candle_shape
 from data.order_flow import get_order_flow_snapshot
-from notifications.telegram_bot import send_confusion_telegram_message  # teesra, alag bot
+try:
+    from notifications.telegram_bot import send_confusion_telegram_message
+except ImportError as exc:
+    # Confusion bot is optional for the 2H tracker. Keep scanning if its
+    # separate Telegram credentials are not configured.
+    print(f"Confusion Telegram bot disabled: {exc}")
+
+    def send_confusion_telegram_message(message: str) -> bool:
+        return False
 import market_regime   # RVOL-independent, no-lookahead regime label (recent + background)
 import config
 

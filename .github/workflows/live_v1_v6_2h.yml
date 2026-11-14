@@ -25,8 +25,8 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           DRY_RUN: "False"
-          V1_V3_BOT_TOKEN: ${{ secrets.V1_V3_BOT_TOKEN }}
-          V1_V3_CHAT_ID: ${{ secrets.V1_V3_CHAT_ID }}
-          V4_V6_BOT_TOKEN: ${{ secrets.V4_V6_BOT_TOKEN }}
-          V4_V6_CHAT_ID: ${{ secrets.V4_V6_CHAT_ID }}
+          V1_V3_BOT_TOKEN: ${{ secrets.TWO_H_BOT_TOKEN }}
+          V1_V3_CHAT_ID: ${{ secrets.TWO_H_CHAT_ID }}
+          V4_V6_BOT_TOKEN: ${{ secrets.TWO_H_BOT_TOKEN }}
+          V4_V6_CHAT_ID: ${{ secrets.TWO_H_CHAT_ID }}
         run: python live_v1_v6_scanner_2h.py

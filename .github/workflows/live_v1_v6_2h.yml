@@ -3,9 +3,8 @@ name: Live V1-V6 Scanner (2H)
 on:
   workflow_dispatch:
   schedule:
-    # GitHub cron is UTC. Runs every 2 hours at even UTC hours, which
-    # corresponds to 05:30, 07:30, 09:30 ... IST candle-close checkpoints.
-    - cron: "0 0,2,4,6,8,10,12,14,16,18,20,22 * * *"
+    # Run 5 minutes after each even UTC hour so the 2H candle is finalized.
+    - cron: "5 0,2,4,6,8,10,12,14,16,18,20,22 * * *"
 
 jobs:
   scan:

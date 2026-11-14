@@ -235,11 +235,9 @@ def _get_matching_strategies(setup):
     """
     Uses the existing V1-V6 strategy conditions.
 
-    ONLY body percentage threshold is changed:
-        previous: < 20%
-        now:      <= 35%
-
-    No S/R, RVOL, touch-count, or other logic is changed.
+    RVOL is recorded for analysis only; it is never a qualification gate.
+    Body <=35% applies to V1, V2, V4 and V5. V3 and V6 intentionally
+    retain their no-body-filter definitions.
     """
 
     row = _setup_to_report_row(setup)
@@ -256,15 +254,13 @@ def _get_matching_strategies(setup):
         matched.append("V1")
 
     if (
-        sr_shape_tracker._in_rvol_2_4_band(row)
-        and _body_upto_35(row)
+_body_upto_35(row)
         and sr_shape_tracker._near_resistance(row)
     ):
         matched.append("V2")
 
     if (
-        sr_shape_tracker._in_rvol_2_4_band(row)
-        and sr_shape_tracker._touch_2_3(row)
+sr_shape_tracker._touch_2_3(row)
         and sr_shape_tracker._near_resistance(row)
     ):
         matched.append("V3")
@@ -272,23 +268,20 @@ def _get_matching_strategies(setup):
     # ---------------- SUPPORT ----------------
 
     if (
-        sr_shape_tracker._in_rvol_2_4_band(row)
-        and sr_shape_tracker._touch_2_3(row)
+sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V4")
 
     if (
-        sr_shape_tracker._in_rvol_2_4_band(row)
-        and _body_upto_35(row)
+_body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):
         matched.append("V5")
 
     if (
-        sr_shape_tracker._in_rvol_2_4_band(row)
-        and sr_shape_tracker._touch_2_3(row)
+sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_support(row)
     ):

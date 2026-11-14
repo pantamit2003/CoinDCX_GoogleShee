@@ -21,6 +21,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Write Google service-account credentials
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+          if not raw:
+              raise RuntimeError("GitHub Secret GOOGLE_CREDENTIALS_JSON is missing or empty")
+          data = json.loads(raw)
+          if data.get("type") != "service_account" or not data.get("private_key"):
+              raise RuntimeError("GOOGLE_CREDENTIALS_JSON is not a valid service-account JSON")
+          Path("credentials.json").write_text(json.dumps(data), encoding="utf-8")
+          print("Google service-account credentials file prepared.")
+          PY
       - name: Run 2H V1-V6 scanner
         env:
           PYTHONUNBUFFERED: "1"

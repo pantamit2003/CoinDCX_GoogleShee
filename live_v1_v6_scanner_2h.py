@@ -15,7 +15,7 @@ Routing:
 
 Detection:
     Existing process_candle() performs:
-        15m closed candle
+        completed 2H closed candle
         -> S/R
         -> CONFUSION
         -> RVOL gate
@@ -249,8 +249,7 @@ def _get_matching_strategies(setup):
     # ---------------- RESISTANCE ----------------
 
     if (
-        sr_shape_tracker._in_rvol_2_4_band(row)
-        and sr_shape_tracker._touch_2_3(row)
+        sr_shape_tracker._touch_2_3(row)
         and _body_upto_35(row)
         and sr_shape_tracker._near_resistance(row)
     ):
@@ -407,7 +406,7 @@ def _build_order_flow_message(setup, order_flow):
         f"<b>Pair:</b> {_fmt(setup.get('pair'))}\n\n"
 
         f"<i>CoinDCX ke recent trades ka snapshot hai. "
-        f"Yeh 15-minute candle Delta nahi hai aur "
+        f"Yeh 2H candle Delta nahi hai aur "
         f"V1-V6 detection/selection mein use nahi hua.</i>\n\n"
 
         f"<b>Buy Volume:</b> {_fmt(buy)}\n"
@@ -485,7 +484,7 @@ def _process_pair(pair, dry_run=False):
         setup_out = []
 
         # EXISTING DETECTION — DO NOT CHANGE.
-        qualified = sr_shape_tracker.process_candle(
+        sr_shape_tracker.process_candle(
             pair,
             df,
             dry_run=dry_run,
@@ -617,14 +616,12 @@ def run_one_cycle():
         try:
             setup_out = []
 
-            qualified = (
-                sr_shape_tracker.process_candle(
+            sr_shape_tracker.process_candle(
                     pair,
                     df,
                     dry_run=DRY_RUN,
                     setup_out=setup_out,
                 )
-            )
 
             # IMPORTANT:
             # Do NOT wait for process_candle() to return True.

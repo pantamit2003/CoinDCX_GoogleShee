@@ -625,7 +625,7 @@ def _rvol_gate_passed(rvol_20, rvol_96):
 # ============================================
 # STAGE 1: CONFUSION candle detect karna + AWAITING_CONFIRMATION mein daalna
 # ============================================
-def process_candle(pair, df, dry_run=False, setup_out=None):
+def process_candle(pair, df, dry_run=False, setup_out=None, record_to_sheets=True):
     """
     Flowchart Stage 1 implement karta hai ek pair ke liye:
         2H candle -> valid S/R ke paas? -> shape classify ->
@@ -719,20 +719,23 @@ def process_candle(pair, df, dry_run=False, setup_out=None):
         background_result = market_regime._insufficient_result(0)
 
     # ---- COOLDOWN: same pair already awaiting-confirmation ya pending ho to skip ----
-    awaiting_ws = _get_awaiting_worksheet()
-    existing_awaiting = awaiting_ws.get_all_records()
-    if _is_pair_already_active(existing_awaiting, pair, active_values=("AWAITING_CONFIRMATION",)):
-        print(f"  [sr_shape_tracker] {pair} already awaiting confirmation — skip.")
-        return False
+    if record_to_sheets:
+        awaiting_ws = _get_awaiting_worksheet()
+        existing_awaiting = awaiting_ws.get_all_records()
+        if _is_pair_already_active(existing_awaiting, pair, active_values=("AWAITING_CONFIRMATION",)):
+            print(f"  [sr_shape_tracker] {pair} already awaiting confirmation — skip.")
+            return False
 
-    pending_ws = _get_pending_worksheet()
-    existing_pending = pending_ws.get_all_records()
-    if _is_pair_already_active(existing_pending, pair, active_values=("PENDING",)):
-        print(f"  [sr_shape_tracker] {pair} already pending (outcome tracking) — skip.")
-        return False
+        pending_ws = _get_pending_worksheet()
+        existing_pending = pending_ws.get_all_records()
+        if _is_pair_already_active(existing_pending, pair, active_values=("PENDING",)):
+            print(f"  [sr_shape_tracker] {pair} already pending (outcome tracking) — skip.")
+            return False
 
     # ---- AWAITING_CONFIRMATION mein add karo (direction abhi nahi) ----
-    if dry_run:
+    if not record_to_sheets:
+        print(f"  [sr_shape_tracker] {pair} sheet tracking disabled; continuing with Telegram setup detection.")
+    elif dry_run:
         print(f"  [sr_shape_tracker][DRY_RUN] {pair} awaiting-confirmation add: "
               f"pos={price_position} shape={shape_ctx['shape']} "
               f"level={sr_level_price} touches={sr_touch_count} "
@@ -740,7 +743,7 @@ def process_candle(pair, df, dry_run=False, setup_out=None):
               f"CONFUSION High={candle_high} Low={candle_low} "
               f"Regime={regime_result['Market_Regime']} Score={regime_result['Regime_Score']} "
               f"Background={background_result['Market_Regime']} BgScore={background_result['Regime_Score']}")
-    else:
+    elif record_to_sheets:
         awaiting_ws.append_row([
             pair,
             _to_ist_str(candle_time),

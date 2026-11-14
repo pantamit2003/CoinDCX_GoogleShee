@@ -477,11 +477,7 @@ def _fetch_pair(pair):
 
 def _process_pair(pair, dry_run=False):
     try:
-        df = get_candles(
-            pair=pair,
-            resolution=RESOLUTION,
-            days=2,
-        )
+        df = get_candles_2h(pair=pair, days=30)
 
         if df is None or df.empty:
             return []

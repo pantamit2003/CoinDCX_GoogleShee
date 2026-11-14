@@ -93,4 +93,21 @@ def get_candles_2h(pair="B-BTC_USDT", days=10):
     for group_time, group in df.groupby("_group", sort=True):
         group = group.sort_values("Time")
 
-        # Keep only complete pairs of hourly candles exactly at
+        # Only a complete, consecutive UTC-aligned pair is a valid 2H candle.
+        expected = [group_time, group_time + pd.Timedelta(hours=1)]
+        actual = list(group["Time"])
+        if actual != expected:
+            continue
+
+        first, second = group.iloc[0], group.iloc[1]
+        rows.append({
+            "Time": group_time,
+            "Open": float(first["Open"]),
+            "High": float(group["High"].max()),
+            "Low": float(group["Low"].min()),
+            "Close": float(second["Close"]),
+            "Volume": float(group["Volume"].sum()),
+        })
+
+    result = pd.DataFrame(rows, columns=required)
+    return result.sort_values("Time").reset_index(drop=True) if not result.empty else result

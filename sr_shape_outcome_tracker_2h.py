@@ -59,7 +59,7 @@ v4.6 — BACKGROUND MARKET REGIME (THIS REVISION, additive-only):
     sheets mein), jaisa regime fields v4.5 mein add hue the.
 
 YEH FLOWCHART IMPLEMENT KARTA HAI (v4, unchanged):
-    15-min candle
+    2H candle
         |
     Kya price valid Support/Resistance ke paas hai? (touch_count >= MIN_SR_TOUCHES)
         |
@@ -80,14 +80,14 @@ YEH FLOWCHART IMPLEMENT KARTA HAI (v4, unchanged):
               decide NAHI karna). Recent + Background market regime
               bhi yahin record hote hain (v4.5 / v4.6).
         |
-    IMMEDIATELY NEXT (aur SIRF immediately next) 15-min candle kya karti hai?
+    IMMEDIATELY NEXT (aur SIRF immediately next) 2H candle kya karti hai?
         CONFUSION HIGH break        -> LONG  (Entry = Confusion High, SL = Confusion Low)
         CONFUSION LOW break         -> SHORT (Entry = Confusion Low,  SL = Confusion High)
         Neither break (ya dono break -> ambiguous) -> NO_CONFIRMATION
              -> setup CLOSED (record ho jaata hai, dobara alive nahi rehta)
         |
     Confirm hone ke baad (LONG/SHORT), confirmation-candle ke time se
-    next 15/30/45/60/90/120 min mein kya hua?
+    next 120/240/360/480/720/960 min mein kya hua?
     (price movement, SL hit/nahi, target R-multiples hit/nahi,
      max favorable/adverse move, first-event WIN_1R/LOSS_SL/
      TIMEOUT/AMBIGUOUS)
@@ -114,7 +114,7 @@ SL / TARGET LOGIC (v4, unchanged):
         SL    = Confusion candle HIGH
         Risk  = SL - Entry
         Target_nR = Entry - n * Risk
-    Outcome-horizons (15/30/45/60/90/120 min) ab CONFIRMATION candle
+    Outcome-horizons (120/240/360/480/720/960 min) ab CONFIRMATION candle
     (immediately next candle) ke time se count hote hain.
 
     SAME-CANDLE AMBIGUITY — DO ALAG CONVENTIONS (IMPORTANT):
@@ -621,7 +621,7 @@ def process_candle(pair, df, dry_run=False, setup_out=None):
     """
     Flowchart Stage 1 implement karta hai ek pair ke liye:
         15-min candle -> valid S/R ke paas? -> shape classify ->
-        SIRF CONFUSION -> RVOL gate pass? -> High/Low record karke
+        SIRF CONFUSION -> RVOL calculate/record -> High/Low record karke
         AWAITING_CONFIRMATION mein daal do.
 
     DIRECTION YAHAN DECIDE NAHI HOTI (v4 change) — woh
@@ -695,8 +695,8 @@ def process_candle(pair, df, dry_run=False, setup_out=None):
     rvol_20 = rvol_vals[LOOKBACK_SHORT]
     rvol_96 = rvol_vals[LOOKBACK_LONG]
 
-    # ---- VOLUME GATE (relaxed v4) ----
-    # RVOL is still calculated and stored for analysis, but is not an eligibility gate.
+    # ---- RVOL (record-only) ----
+    # RVOL is calculated and stored for analysis; it never blocks eligibility.
 
     # ---- MARKET REGIME: RECENT + BACKGROUND (no-lookahead, no extra API call) ----
     # df.iloc[:-1] = confusion candle ko EXCLUDE karke, saari pichli
@@ -765,7 +765,7 @@ def process_candle(pair, df, dry_run=False, setup_out=None):
     print(f"  [sr_shape_tracker] {pair} qualified for confirmation: {price_position} "
           f"(touched {sr_touch_count}x) | Shape=CONFUSION "
           f"({shape_ctx['strength']}, body={shape_ctx['body_pct']}%) | "
-          f"RVOL_20={rvol_20} RVOL_96={rvol_96} (gate PASSED) | "
+          f"RVOL_20={rvol_20} RVOL_96={rvol_96} (record-only; no gate) | "
           f"High={candle_high} Low={candle_low} | "
           f"Regime={regime_result['Market_Regime']} (score={regime_result['Regime_Score']}) | "
           f"Background={background_result['Market_Regime']} (score={background_result['Regime_Score']}) — "
@@ -2433,10 +2433,11 @@ def _touch_2_3(row):
         return False
 
 
-def _body_lt_20(row):
+def _body_upto_35(row):
+    """Body percentage <= 35%; missing/non-numeric values do not qualify."""
     body = row.get("Body_Pct", "")
     try:
-        return body != "" and float(body) < 20
+        return body != "" and float(body) <= 35
     except (TypeError, ValueError):
         return False
 
@@ -2483,14 +2484,14 @@ def generate_backtest_summary(v_filters=True):
     if not v_filters:
         return
 
-    v1_rows = [r for r in resolved if _touch_2_3(r) and _body_lt_20(r) and _near_resistance(r)]
+    v1_rows = [r for r in resolved if _touch_2_3(r) and _body_upto_35(r) and _near_resistance(r)]
     v2_rows = [r for r in resolved if _body_lt_20(r) and _near_resistance(r)]
     v3_rows = [r for r in resolved if _touch_2_3(r) and _near_resistance(r)]
 
     print("\n" + "=" * 60)
-    print("STRATEGY VARIANTS (base: RVOL20 2-3 + NEAR_RESISTANCE)")
+    print("STRATEGY VARIANTS (base: NEAR_RESISTANCE; RVOL recorded only)")
     print("=" * 60)
-    _print_stats_block(v1_rows, "V1: + Touch 2-3 + Body <20%")
+    _print_stats_block(v1_rows, "V1: + Touch 2-3 + Body <=35%")
     _print_stats_block(v2_rows, "V2: + Body <20% (no touch filter)")
     _print_stats_block(v3_rows, "V3: + Touch 2-3 (no body filter)")
 
@@ -2499,7 +2500,7 @@ def generate_backtest_summary(v_filters=True):
     v6_rows = [r for r in resolved if _touch_2_3(r) and _near_support(r)]
 
     print("\n" + "=" * 60)
-    print("STRATEGY VARIANTS (base: RVOL20 2-3 + NEAR_SUPPORT)")
+    print("STRATEGY VARIANTS (base: NEAR_SUPPORT; RVOL recorded only)")
     print("=" * 60)
     _print_stats_block(v4_rows, "V4: + Touch 2-3 + Body <20%")
     _print_stats_block(v5_rows, "V5: + Body <20% (no touch filter)")
@@ -2709,7 +2710,7 @@ if __name__ == "__main__":
     print("sr_shape_outcome_tracker (v4.6) — standalone test run")
     print(f"Horizons: {HORIZONS_MINUTES} min => candles {HORIZONS_CANDLES}")
     print(f"MIN_SR_TOUCHES = {MIN_SR_TOUCHES} (soft floor, not a hard reliability filter)")
-    print(f"RVOL gate: RVOL_20 >= {RVOL_SHORT_THRESHOLD} OR RVOL_96 >= {RVOL_LONG_THRESHOLD}")
+    print(f"RVOL calculation: RVOL_20/RVOL_96 recorded for analysis only (no eligibility gate)")
     print(f"TARGET_RR = {TARGET_RR}")
     print(f"First-event horizon: {FIRST_EVENT_HORIZON_MINUTES} min")
     print(f"Market regime (recent): lookback={market_regime.DEFAULT_LOOKBACK}, "
